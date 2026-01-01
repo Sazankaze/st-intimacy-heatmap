@@ -1,0 +1,197 @@
+/* 模态框背景 */
+.intimacy-plugin-overlay {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0, 0, 0, 0.7);
+    z-index: 9999;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    backdrop-filter: blur(2px);
+}
+
+/* 模态框主体 */
+.intimacy-plugin-dialog {
+    background: var(--SmartThemeBlurBG, #1e1e1e);
+    border: 1px solid var(--SmartThemeBorderColor, #444);
+    border-radius: 10px;
+    width: 90%;
+    max-width: 700px;
+    max-height: 90vh;
+    display: flex;
+    flex-direction: column;
+    color: var(--SmartThemeBodyColor, #e0e0e0);
+    box-shadow: 0 10px 40px rgba(0,0,0,0.5);
+    font-family: sans-serif;
+}
+
+.intimacy-header {
+    padding: 1rem;
+    border-bottom: 1px solid var(--SmartThemeBorderColor, #444);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.intimacy-header h3 {
+    margin: 0;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.intimacy-close-btn {
+    background: transparent;
+    border: none;
+    color: var(--SmartThemeBodyColor, #ccc);
+    font-size: 1.5rem;
+    cursor: pointer;
+}
+
+.intimacy-body {
+    padding: 1.5rem;
+    overflow-y: auto;
+}
+
+/* 统计卡片 Grid */
+.intimacy-stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 1rem;
+    margin-bottom: 2rem;
+}
+
+.intimacy-stat-card {
+    background: var(--SmartThemebgTint, rgba(0,0,0,0.2));
+    padding: 1rem;
+    border-radius: 8px;
+    text-align: center;
+    border: 1px solid var(--SmartThemeBorderColor, #444);
+    transition: transform 0.2s;
+}
+
+.intimacy-stat-card:hover {
+    transform: translateY(-2px);
+    border-color: #e91e63;
+}
+
+.intimacy-stat-label {
+    font-size: 0.85rem;
+    opacity: 0.7;
+    margin-bottom: 0.5rem;
+}
+
+.intimacy-stat-value {
+    font-size: 1.4rem;
+    font-weight: 800;
+    color: #e91e63; /* 核心主题色 */
+    line-height: 1.2;
+}
+
+.intimacy-stat-sub {
+    font-size: 0.75rem;
+    opacity: 0.5;
+    margin-top: 0.4rem;
+}
+
+/* 日历热力图部分 */
+.intimacy-calendar-section {
+    border-top: 1px solid var(--SmartThemeBorderColor, #444);
+    padding-top: 1.5rem;
+}
+
+.intimacy-calendar-nav {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 1rem;
+    background: var(--SmartThemebgTint, rgba(0,0,0,0.1));
+    padding: 0.5rem;
+    border-radius: 5px;
+}
+
+.intimacy-nav-btn {
+    background: var(--SmartThemeInputColor, #333);
+    border: 1px solid var(--SmartThemeBorderColor, #555);
+    color: var(--SmartThemeBodyColor, #fff);
+    width: 30px; height: 30px;
+    cursor: pointer;
+    border-radius: 4px;
+}
+
+.intimacy-nav-btn:hover {
+    background: #e91e63;
+    border-color: #e91e63;
+}
+
+.intimacy-month-grid {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    gap: 4px;
+    max-width: 400px;
+    margin: 0 auto;
+}
+
+.intimacy-day-header {
+    text-align: center;
+    font-size: 0.75rem;
+    opacity: 0.6;
+    padding-bottom: 5px;
+}
+
+.intimacy-day-cell {
+    aspect-ratio: 1;
+    border-radius: 3px;
+    background: rgba(255,255,255,0.05);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.75rem;
+    color: rgba(255,255,255,0.3);
+    position: relative;
+    cursor: default;
+}
+
+.intimacy-day-cell.has-data {
+    cursor: pointer;
+    color: #fff;
+    font-weight: bold;
+}
+
+/* 热力图等级颜色 */
+.intimacy-level-1 { background-color: #5c2b3b; color: #ffcdd2; }
+.intimacy-level-2 { background-color: #a04264; color: #fff; }
+.intimacy-level-3 { background-color: #e91e63; color: #fff; }
+.intimacy-level-4 { background-color: #ff80ab; color: #000; }
+
+/* 悬浮 Tooltip */
+.intimacy-tooltip {
+    position: absolute;
+    bottom: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(0,0,0,0.9);
+    padding: 5px 8px;
+    border-radius: 4px;
+    font-size: 0.7rem;
+    white-space: nowrap;
+    pointer-events: none;
+    z-index: 10;
+    display: none;
+    border: 1px solid #555;
+}
+
+.intimacy-day-cell:hover .intimacy-tooltip {
+    display: block;
+}
+
+/* 顶部按钮样式 */
+.intimacy-top-btn {
+    cursor: pointer;
+    opacity: 0.7;
+    transition: all 0.2s;
+}
+.intimacy-top-btn:hover {
+    opacity: 1;
+    color: #e91e63;
+}
