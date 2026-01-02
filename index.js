@@ -1,514 +1,480 @@
-/*
-    SillyTavern Extension: Intimacy Heatmap (Fixed 404 Version)
-    Fixed: Uses /api/chats/get for both listing and fetching to compatible with new ST API.
-*/
+import { getContext } from "../../../extensions.js";
+import { getPastCharacterChats } from '../../../../script.js';
 
-(function () {
-    const extensionName = "st-intimacy-heatmap";
+const extensionName = "st-intimacy-heatmap";
+const extensionCss = `/scripts/extensions/third-party/${extensionName}/style.css`;
 
-    // 状态存储
-    let intimacyData = {
-        calendarMonths: [],
-        currentMonthIndex: 0
-    };
+let intimacyState = {
+    calendarMonths: [],
+    currentMonthIndex: 0,
+    stats: null
+};
 
-    // 并发控制器
-    async function asyncPool(poolLimit, array, iteratorFn, onProgress) {
-        const ret = [];
-        const executing = [];
-        let completed = 0;
-        const total = array.length;
+// === 1. 并发控制器 (用于全局统计) ===
+async function asyncPool(poolLimit, array, iteratorFn, onProgress) {
+    const ret = [];
+    const executing = [];
+    let completed = 0;
+    const total = array.length;
 
-        for (const item of array) {
-            const p = Promise.resolve().then(() => iteratorFn(item, array));
-            ret.push(p);
+    for (const item of array) {
+        const p = Promise.resolve().then(() => iteratorFn(item));
+        ret.push(p);
 
-            const e = p.then(() => {
-                executing.splice(executing.indexOf(e), 1);
-                completed++;
-                if (onProgress) onProgress(completed, total);
+        const e = p.then(() => {
+            executing.splice(executing.indexOf(e), 1);
+            completed++;
+            if (onProgress) onProgress(completed, total);
+        });
+        executing.push(e);
+
+        if (executing.length >= poolLimit) {
+            await Promise.race(executing);
+        }
+    }
+    return Promise.all(ret);
+}
+
+// === 2. 工具函数 ===
+const monthMap = {
+    Jan: '01', January: '01', Feb: '02', February: '02', Mar: '03', March: '03',
+    Apr: '04', April: '04', May: '05', May: '05', Jun: '06', June: '06',
+    Jul: '07', July: '07', Aug: '08', August: '08', Sep: '09', September: '09',
+    Oct: '10', October: '10', Nov: '11', November: '11', Dec: '12', December: '12'
+};
+
+function parseSTDate(dateString) {
+    if (!dateString) return null;
+    if (typeof dateString === 'number') return new Date(dateString);
+
+    // 尝试解析 SillyTavern 常见格式: "Month Day, Year HH:MMam/pm"
+    const parts = dateString.match(/(\w+)\s+(\d+),\s+(\d+)\s+(\d+):(\d+)(am|pm)/i);
+    if (parts) {
+        const month = monthMap[parts[1]] || '01';
+        let h = parseInt(parts[4]);
+        if (parts[6].toLowerCase() === 'pm' && h !== 12) h += 12;
+        if (parts[6].toLowerCase() === 'am' && h === 12) h = 0;
+        const iso = `${parts[3]}-${month}-${parts[2].padStart(2,'0')}T${String(h).padStart(2,'0')}:${parts[5]}:00`;
+        return new Date(iso);
+    }
+    
+    // 兜底尝试
+    const d = new Date(dateString);
+    return isNaN(d.getTime()) ? null : d;
+}
+
+// === 3. 核心数据获取逻辑 (Reference.js 思路) ===
+
+// 获取单个文件的内容 (通过 URL Fetch)
+async function fetchChatFileContent(folderName, fileName) {
+    // 尝试两种常见的路径结构
+    // 1. /chats/FolderName/FileName (ID based)
+    // 2. /chats/EncodedName/FileName (Name based)
+    
+    // 优先使用 ID/文件夹名
+    let url = `/chats/${folderName}/${encodeURIComponent(fileName)}`;
+    
+    try {
+        let res = await fetch(url, { method: 'GET' });
+        
+        if (!res.ok) {
+            // 如果 ID 路径失败，尝试从文件名解析角色名作为文件夹
+            // 假设文件名格式 "CharName - Date.jsonl"
+            const charNameFromFill = fileName.split(' - ')[0];
+            if (charNameFromFill) {
+                url = `/chats/${encodeURIComponent(charNameFromFill)}/${encodeURIComponent(fileName)}`;
+                res = await fetch(url, { method: 'GET' });
+            }
+        }
+
+        if (res.ok) {
+            const text = await res.text();
+            const lines = text.trim().split('\n');
+            const messages = [];
+            lines.forEach(line => {
+                try {
+                    const json = JSON.parse(line);
+                    // 过滤掉只有元数据没有日期的行
+                    if (json.send_date) messages.push(json);
+                } catch(e) {}
             });
-            executing.push(e);
-
-            if (executing.length >= poolLimit) {
-                await Promise.race(executing);
-            }
+            return messages;
         }
-        return Promise.all(ret);
+    } catch (e) {
+        console.warn(`Failed to fetch ${url}`, e);
     }
+    return [];
+}
 
-    // === 工具函数 ===
-    function parseSTDate(dateInput) {
-        if (!dateInput) return null;
-        if (typeof dateInput === 'number') return new Date(dateInput);
-        let dateStr = String(dateInput).trim();
-        if (dateStr.includes('@')) { try { const isoStr = dateStr.replace('@', 'T').replace('h', ':').replace('m', ':').replace('s', ''); const d = new Date(isoStr); if (!isNaN(d.getTime())) return d; } catch (e) {} }
-        let d = new Date(dateStr);
-        if (!isNaN(d.getTime())) return d;
-        if (/am|pm/i.test(dateStr) && !/\s(am|pm)/i.test(dateStr)) { const fixedStr = dateStr.replace(/(\d)(am|pm)/i, '$1 $2'); d = new Date(fixedStr); if (!isNaN(d.getTime())) return d; }
-        return null;
-    }
+// 获取单个角色的所有聊天记录
+async function getCharacterMessages(avatarId) {
+    try {
+        // 1. 使用 ST 提供的 script.js 函数获取文件列表 (元数据)
+        const chats = await getPastCharacterChats(avatarId);
+        if (!chats || chats.length === 0) return [];
 
-    // === 核心统计逻辑 ===
-    function calculateStats(messages) {
-        if (!messages || !messages.length) return null;
-        
-        const validMessages = messages.filter(m => m.send_date);
-        if (!validMessages.length) return null;
+        // 2. 提取文件夹名 (去除扩展名)
+        const folderName = avatarId.replace(/\.[^/.]+$/, "");
 
-        // 排序
-        const sortedMsgs = [...validMessages].sort((a, b) => {
-            const tA = parseSTDate(a.send_date)?.getTime() || 0;
-            const tB = parseSTDate(b.send_date)?.getTime() || 0;
-            return tA - tB;
+        // 3. 并发读取该角色的所有文件内容 (限制并发数为 5)
+        const allFileMessages = await asyncPool(5, chats, async (chatMeta) => {
+            return await fetchChatFileContent(folderName, chatMeta.file_name);
         });
 
-        let totalChars = 0;
-        let totalRerolls = 0;
-        const dayMap = new Map();
+        return allFileMessages.flat();
+    } catch (e) {
+        console.error("Error fetching char chats:", e);
+        return [];
+    }
+}
 
-        sortedMsgs.forEach(msg => {
-            const content = msg.mes || ""; 
-            const msgLen = content.length;
-            
-            if (content) totalChars += msgLen;
-            if (msg.swipes && msg.swipes.length > 1) totalRerolls += (msg.swipes.length - 1);
+// 获取全局所有角色的聊天记录
+async function getGlobalMessages(onProgress) {
+    const context = getContext();
+    const characters = context.characters;
+    // 过滤掉无效角色（没有 avatar 字段的）
+    const validChars = characters.filter(c => c && c.avatar);
+    
+    // 全局并发读取 (限制并发数为 3 个角色同时读取，防止 IO 爆炸)
+    const results = await asyncPool(3, validChars, async (char) => {
+        return await getCharacterMessages(char.avatar);
+    }, onProgress);
 
-            const date = parseSTDate(msg.send_date);
-            if (date) {
-                const y = date.getFullYear();
-                const m = String(date.getMonth() + 1).padStart(2, '0');
-                const d = String(date.getDate()).padStart(2, '0');
-                const dateStr = `${y}-${m}-${d}`;
+    return results.flat();
+}
 
-                if (!dayMap.has(dateStr)) {
-                    dayMap.set(dateStr, { count: 0, chars: 0 });
-                }
-                const dayData = dayMap.get(dateStr);
-                dayData.count += 1;
-                dayData.chars += msgLen;
-            }
-        });
+// === 4. 统计计算逻辑 (移植自 App.vue) ===
+function calculateStats(messages) {
+    if (!messages.length) return null;
 
-        const firstDateObj = parseSTDate(sortedMsgs[0].send_date);
-        const monthsData = [];
-        
-        if (firstDateObj) {
-            let currentYear = firstDateObj.getFullYear();
-            let currentMonth = firstDateObj.getMonth();
-            const now = new Date();
-            const endYear = now.getFullYear();
-            const endMonth = now.getMonth();
+    // 按时间排序
+    messages.sort((a, b) => parseSTDate(a.send_date) - parseSTDate(b.send_date));
 
-            while (currentYear < endYear || (currentYear === endYear && currentMonth <= endMonth)) {
-                const daysInMonth = new Date(currentYear, currentMonth + 1, 0).getDate();
-                const firstDayObj = new Date(currentYear, currentMonth, 1);
-                const paddingStart = firstDayObj.getDay(); 
+    const dayMap = new Map();
+    let totalChars = 0;
+    let totalRerolls = 0;
 
-                const days = [];
-                let monthTotalCount = 0;
-                let monthTotalChars = 0;
-
-                for (let d = 1; d <= daysInMonth; d++) {
-                    const mStr = String(currentMonth + 1).padStart(2, '0');
-                    const dStr = String(d).padStart(2, '0');
-                    const dateStr = `${currentYear}-${mStr}-${dStr}`;
-                    
-                    const data = dayMap.get(dateStr) || { count: 0, chars: 0 };
-                    
-                    let level = 0;
-                    if (data.count > 0) level = 1;
-                    if (data.count > 50) level = 2;
-                    if (data.count > 150) level = 3;
-                    if (data.count > 300) level = 4;
-
-                    days.push({
-                        dayNum: d,
-                        dateStr: dateStr,
-                        count: data.count,
-                        chars: data.chars,
-                        level: level
-                    });
-                    
-                    monthTotalCount += data.count;
-                    monthTotalChars += data.chars;
-                }
-
-                monthsData.push({
-                    year: currentYear,
-                    month: currentMonth + 1,
-                    paddingStart: paddingStart,
-                    days: days,
-                    totalCount: monthTotalCount,
-                    totalChars: monthTotalChars
-                });
-
-                currentMonth++;
-                if (currentMonth > 11) {
-                    currentMonth = 0;
-                    currentYear++;
-                }
-            }
+    messages.forEach(msg => {
+        const content = msg.mes || "";
+        const len = content.length;
+        totalChars += len;
+        // 简单判断 swipe: 如果 swipes 数组长度 > 1，说明重试过
+        if (msg.swipes && Array.isArray(msg.swipes) && msg.swipes.length > 1) {
+            totalRerolls += (msg.swipes.length - 1);
         }
 
-        const now = new Date();
-        const daysSince = Math.floor((now - firstDateObj) / (24 * 3600 * 1000));
+        const date = parseSTDate(msg.send_date);
+        if (date) {
+            const y = date.getFullYear();
+            const m = String(date.getMonth() + 1).padStart(2, '0');
+            const d = String(date.getDate()).padStart(2, '0');
+            const dateStr = `${y}-${m}-${d}`;
 
-        return {
-            firstDate: firstDateObj ? firstDateObj.toLocaleDateString() : 'N/A',
-            daysSince: daysSince,
-            activeDays: dayMap.size,
-            totalMessages: sortedMsgs.length,
-            totalChars: totalChars,
-            totalRerolls: totalRerolls,
-            calendarMonths: monthsData.reverse()
-        };
-    }
-
-    // === 数据获取逻辑 (核心修复) ===
-
-    async function fetchAllChatsForCharacter(avatarUrl) {
-        try {
-            // 🛑 修复点 1：把 /api/chats/list 改为 /api/chats/get
-            // ST 的新逻辑：只传 avatar_url 给 get 接口，它会返回文件列表
-            const chatList = await jQuery.post('/api/chats/get', { avatar_url: avatarUrl });
-            
-            if (!chatList || !Array.isArray(chatList) || chatList.length === 0) {
-                // 有时候 ST 返回的是 { "chat": [] } 格式，兼容一下
-                if (chatList && chatList.chat && Array.isArray(chatList.chat)) {
-                     // 如果数据在 chat 字段里
-                     if(chatList.chat.length === 0) return [];
-                     // 如果 chatList.chat 是数组，我们继续
-                } else {
-                    return [];
-                }
-            }
-
-            // 这里的 chatList 应该是一个文件名数组 ['chat1.jsonl', 'chat2.jsonl']
-            // 或者如果是对象格式，我们需要提取出来
-            const fileList = Array.isArray(chatList) ? chatList : (chatList.chat || []);
-
-            console.log(`[Intimacy] Found ${fileList.length} chat files for ${avatarUrl}`);
-
-            const results = await asyncPool(5, fileList, (fileName) => {
-                // 🛑 修复点 2：这里也用 /api/chats/get，但是带上 file_name 参数来获取内容
-                return jQuery.post('/api/chats/get', { 
-                    avatar_url: avatarUrl, 
-                    file_name: fileName 
-                })
-                .then(data => {
-                    // 兼容：有时候返回的是对象 { ... data ... }，有时候是数组
-                    return Array.isArray(data) ? data : [];
-                })
-                .catch(err => {
-                    console.warn(`Skipping ${fileName}:`, err);
-                    return [];
-                });
-            });
-
-            return results.flat();
-        } catch (error) {
-            console.warn(`Failed to fetch chats for ${avatarUrl}`, error);
-            // 这里不 throw 错误，而是返回空数组，防止一个角色失败卡死整个全局统计
-            return [];
+            if (!dayMap.has(dateStr)) dayMap.set(dateStr, { count: 0, chars: 0 });
+            const dData = dayMap.get(dateStr);
+            dData.count++;
+            dData.chars += len;
         }
-    }
-
-    function updateLoadingText(text, subtext = "") {
-        const $loading = $('#intimacy-loading');
-        if ($loading.length) {
-            $loading.find('.loading-text').text(text);
-            $loading.find('.loading-subtext').text(subtext);
-        }
-    }
-
-    async function fetchGlobalData() {
-        const characters = SillyTavern.getContext().characters;
-        const validChars = characters.filter(c => c && c.avatar);
-        const totalChars = validChars.length;
-        
-        updateLoadingText(`准备读取 ${totalChars} 个角色...`);
-
-        const charResults = await asyncPool(3, validChars, async (char) => {
-            const msgs = await fetchAllChatsForCharacter(char.avatar);
-            return msgs;
-        }, (completed, total) => {
-            updateLoadingText(`正在读取角色 (${completed}/${total})`, `当前进度: ${Math.round(completed/total*100)}%`);
-        });
-
-        updateLoadingText("正在合并时间线...", "即将完成");
-        return charResults.flat();
-    }
-
-    // === UI 构建 ===
-
-    function renderCalendarGrid(monthData) {
-        if (!monthData) return '<div style="text-align:center;padding:20px;">无数据</div>';
-
-        let html = `
-            <div class="intimacy-month-card">
-                <div class="intimacy-month-grid">
-                    <div class="intimacy-day-header">日</div>
-                    <div class="intimacy-day-header">一</div>
-                    <div class="intimacy-day-header">二</div>
-                    <div class="intimacy-day-header">三</div>
-                    <div class="intimacy-day-header">四</div>
-                    <div class="intimacy-day-header">五</div>
-                    <div class="intimacy-day-header">六</div>
-        `;
-
-        for (let i = 0; i < monthData.paddingStart; i++) {
-            html += `<div class="intimacy-day-cell padding"></div>`;
-        }
-
-        monthData.days.forEach(day => {
-            const hasDataClass = day.count > 0 ? 'has-data' : '';
-            const levelClass = day.count > 0 ? `intimacy-level-${day.level}` : '';
-            
-            const tooltipHtml = `
-                <div class="intimacy-tooltip">
-                    ${day.dateStr}<br>
-                    消息: ${day.count}<br>
-                    字数: ${day.chars}
-                </div>
-            `;
-
-            html += `
-                <div class="intimacy-day-cell ${hasDataClass} ${levelClass}">
-                    ${day.dayNum}
-                    ${day.count > 0 ? tooltipHtml : ''}
-                </div>
-            `;
-        });
-
-        html += `</div>
-            <div style="text-align:center; font-size:0.8rem; margin-top:10px; opacity:0.7;">
-                本月消息: ${monthData.totalCount} | 字数: ${monthData.totalChars}
-            </div>
-        </div>`;
-        
-        return html;
-    }
-
-    function updateCalendarView(container) {
-        const monthData = intimacyData.calendarMonths[intimacyData.currentMonthIndex];
-        const gridContainer = container.find('#intimacy-calendar-container');
-        const label = container.find('#intimacy-month-label');
-        
-        if(monthData) {
-            gridContainer.html(renderCalendarGrid(monthData));
-            label.text(`${monthData.year}年 ${monthData.month}月`);
-        } else {
-            gridContainer.html('<div style="padding:20px;text-align:center">暂无数据</div>');
-            label.text("无数据");
-        }
-        
-        container.find('#btn-prev-month').prop('disabled', intimacyData.currentMonthIndex >= intimacyData.calendarMonths.length - 1);
-        container.find('#btn-next-month').prop('disabled', intimacyData.currentMonthIndex <= 0);
-    }
-
-    function showLoading() {
-        const loadingHtml = `
-            <div class="intimacy-plugin-overlay" id="intimacy-loading">
-                <div class="intimacy-plugin-dialog" style="max-width:300px; height:180px; justify-content:center; align-items:center;">
-                    <div style="font-size:1.5rem; margin-bottom:15px; color:#e91e63;">
-                        <i class="fa-solid fa-heart fa-beat"></i>
-                    </div>
-                    <div class="loading-text" style="font-weight:bold; margin-bottom:5px;">正在读取记忆回路...</div>
-                    <div class="loading-subtext" style="font-size:0.8rem; opacity:0.6;">请稍候</div>
-                </div>
-            </div>
-        `;
-        $('body').append(loadingHtml);
-    }
-
-    function hideLoading() {
-        $('#intimacy-loading').remove();
-    }
-
-    function renderModal(title, stats) {
-        $('#intimacy-overlay').remove();
-        
-        intimacyData.calendarMonths = stats.calendarMonths;
-        intimacyData.currentMonthIndex = 0;
-
-        const modalHtml = `
-            <div class="intimacy-plugin-overlay" id="intimacy-overlay">
-                <div class="intimacy-plugin-dialog">
-                    <div class="intimacy-header">
-                        <h3><i class="fa-solid fa-heart" style="color:#e91e63;"></i> ${title}</h3>
-                        <div style="display:flex; gap:10px; align-items:center;">
-                            <button id="btn-switch-global" class="intimacy-nav-btn" style="width:auto; padding:0 10px; font-size:0.8rem;" title="计算所有角色的总和">
-                                🌍 全局统计
-                            </button>
-                            <button class="intimacy-close-btn" id="intimacy-close">×</button>
-                        </div>
-                    </div>
-                    
-                    <div class="intimacy-body">
-                        <div class="intimacy-stats-grid">
-                            <div class="intimacy-stat-card">
-                                <div class="intimacy-stat-label">首次对话</div>
-                                <div class="intimacy-stat-value" style="font-size:1rem; padding: 4px 0;">${stats.firstDate}</div>
-                                <div class="intimacy-stat-sub">距今 ${stats.daysSince} 天</div>
-                            </div>
-                            <div class="intimacy-stat-card">
-                                <div class="intimacy-stat-label">活跃天数</div>
-                                <div class="intimacy-stat-value">${stats.activeDays} <span style="font-size:0.8rem">天</span></div>
-                                <div class="intimacy-stat-sub">累计陪伴</div>
-                            </div>
-                            <div class="intimacy-stat-card">
-                                <div class="intimacy-stat-label">消息总数</div>
-                                <div class="intimacy-stat-value">${stats.totalMessages}</div>
-                                <div class="intimacy-stat-sub">${(stats.totalChars / 10000).toFixed(2)}万 字</div>
-                            </div>
-                            <div class="intimacy-stat-card">
-                                <div class="intimacy-stat-label">重Roll次数</div>
-                                <div class="intimacy-stat-value">${stats.totalRerolls}</div>
-                                <div class="intimacy-stat-sub">全时空汇总</div>
-                            </div>
-                        </div>
-
-                        <div class="intimacy-calendar-section">
-                            <div class="intimacy-calendar-nav">
-                                <button class="intimacy-nav-btn" id="btn-next-month">◀</button>
-                                <div style="font-weight:bold;" id="intimacy-month-label">加载中...</div>
-                                <button class="intimacy-nav-btn" id="btn-prev-month">▶</button>
-                            </div>
-                            <div id="intimacy-calendar-container"></div>
-                        </div>
-                    </div>
-                </div>
-            </div>
-        `;
-
-        $('body').append(modalHtml);
-        const $overlay = $('#intimacy-overlay');
-        
-        $overlay.find('#intimacy-close').on('click', () => $overlay.remove());
-        $overlay.on('click', (e) => {
-            if (e.target.id === 'intimacy-overlay') $overlay.remove();
-        });
-
-        $overlay.find('#btn-switch-global').on('click', async () => {
-            $overlay.remove(); 
-            await initGlobalMode();
-        });
-
-        $overlay.find('#btn-next-month').on('click', () => {
-             if (intimacyData.currentMonthIndex < intimacyData.calendarMonths.length - 1) {
-                 intimacyData.currentMonthIndex++;
-                 updateCalendarView($overlay);
-             }
-        });
-        
-        $overlay.find('#btn-prev-month').on('click', () => {
-             if (intimacyData.currentMonthIndex > 0) {
-                 intimacyData.currentMonthIndex--;
-                 updateCalendarView($overlay);
-             }
-        });
-
-        updateCalendarView($overlay);
-    }
-
-    // === 业务逻辑入口 ===
-
-    async function initCharacterMode() {
-        const context = SillyTavern.getContext();
-        const charName = context.characters[context.characterId].name;
-        const charAvatar = context.characters[context.characterId].avatar;
-
-        showLoading();
-        updateLoadingText(`读取 ${charName} 的记忆...`);
-
-        try {
-            const allMessages = await fetchAllChatsForCharacter(charAvatar);
-            const stats = calculateStats(allMessages);
-            hideLoading();
-
-            if (!stats) {
-                // 如果没有拿到数据，可能是刚换了文件名，或者确实没聊天
-                toastr.warning("未找到历史记录，或者读取接口被拒绝", "提示");
-                return;
-            }
-            renderModal(`${charName} - 情感档案`, stats);
-        } catch (e) {
-            hideLoading();
-            console.error(e);
-            toastr.error("读取失败，请查看控制台", "错误");
-        }
-    }
-
-    async function initGlobalMode() {
-        showLoading();
-        try {
-            const allMessages = await fetchGlobalData();
-            
-            updateLoadingText("正在生成热力图...");
-            await new Promise(resolve => setTimeout(resolve, 100));
-
-            const stats = calculateStats(allMessages);
-            hideLoading();
-
-            if (!stats) {
-                toastr.warning("未找到任何聊天记录", "全局统计");
-                return;
-            }
-            renderModal(`全员统计 (${stats.activeDays}天活跃)`, stats);
-            $('#btn-switch-global').hide();
-            
-        } catch (e) {
-            hideLoading();
-            console.error(e);
-            toastr.error("全局统计失败，请检查控制台", "错误");
-        }
-    }
-
-    async function handleTrigger() {
-        const context = SillyTavern.getContext();
-        if (context.characterId) {
-            await initCharacterMode();
-        } else {
-            if(confirm("当前未打开任何对话。是否要进行【全角色全局统计】？\n警告：角色较多时可能需要较长时间。")) {
-                await initGlobalMode();
-            }
-        }
-    }
-
-    // === 插件加载 (双保险：同时尝试注入菜单和悬浮窗) ===
-    jQuery(document).ready(function () {
-        console.log("St-Intimacy-Heatmap: Plugin Loaded (404 FIX APPLIED)."); 
-
-        // 1. 尝试添加到扩展菜单
-        const menuBtnHtml = `
-            <div id="intimacy-trigger-menu" class="list-group-item" style="cursor:pointer; display:flex; align-items:center;">
-                <i class="fa-solid fa-heart-pulse" style="color: #e91e63; margin-right:10px; width:20px; text-align:center;"></i>
-                <span>情感档案</span>
-            </div>
-        `;
-        setTimeout(() => {
-            if ($('#extensionsMenu').length) {
-                $('#extensionsMenu').append(menuBtnHtml);
-            }
-        }, 1500);
-        
-        // 2. 强制悬浮按钮 (为了让你肯定能找到它)
-        const floatBtnHtml = `
-            <div id="intimacy-trigger-float" 
-                 style="position:fixed; bottom:20px; right:20px; width:50px; height:50px; 
-                        background:#e91e63; border-radius:50%; color:white; 
-                        display:flex; align-items:center; justify-content:center; 
-                        font-size:24px; cursor:pointer; box-shadow:0 4px 10px rgba(0,0,0,0.3); z-index:99999;"
-                 title="点击查看情感档案">
-                <i class="fa-solid fa-heart-pulse"></i>
-            </div>
-        `;
-        $('body').append(floatBtnHtml);
-
-        $(document).on('click', '#intimacy-trigger-menu', handleTrigger);
-        $(document).on('click', '#intimacy-trigger-float', handleTrigger);
-        
-        toastr.success("情感档案插件已加载 (API已修复)", "Success");
     });
-})();
+
+    const firstDate = parseSTDate(messages[0].send_date);
+    const lastDate = parseSTDate(messages[messages.length - 1].send_date) || new Date();
+
+    // 生成日历月数据
+    const monthsData = [];
+    let curY = firstDate.getFullYear();
+    let curM = firstDate.getMonth();
+    const endY = lastDate.getFullYear();
+    const endM = lastDate.getMonth();
+
+    while (curY < endY || (curY === endY && curM <= endM)) {
+        const daysInMonth = new Date(curY, curM + 1, 0).getDate();
+        const firstDayObj = new Date(curY, curM, 1);
+        const paddingStart = firstDayObj.getDay();
+
+        const days = [];
+        let mCount = 0;
+        let mChars = 0;
+
+        for (let d = 1; d <= daysInMonth; d++) {
+            const dateStr = `${curY}-${String(curM + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+            const data = dayMap.get(dateStr) || { count: 0, chars: 0 };
+            
+            mCount += data.count;
+            mChars += data.chars;
+
+            let level = 0;
+            if (data.count > 0) level = 1;
+            if (data.count > 20) level = 2;
+            if (data.count > 50) level = 3;
+            if (data.count > 100) level = 4;
+
+            days.push({ dayNum: d, dateStr, count: data.count, chars: data.chars, level });
+        }
+
+        monthsData.push({
+            year: curY, month: curM + 1, paddingStart, days,
+            totalCount: mCount, totalChars: mChars
+        });
+
+        curM++;
+        if (curM > 11) { curM = 0; curY++; }
+    }
+
+    return {
+        firstDate: firstDate.toLocaleDateString(),
+        daysSince: Math.floor((new Date() - firstDate) / 86400000),
+        activeDays: dayMap.size,
+        totalMessages: messages.length,
+        totalChars,
+        totalRerolls,
+        calendarMonths: monthsData.reverse() // 倒序，最近的月份在前
+    };
+}
+
+// === 5. UI 渲染逻辑 ===
+
+function renderModalUI(title) {
+    const s = intimacyState.stats;
+    if (!s) return;
+
+    const html = `
+    <div id="st-intimacy-overlay">
+        <div class="st-intimacy-dialog">
+            <div class="st-intimacy-header">
+                <h3><i class="fa-solid fa-heart-pulse"></i> ${title}</h3>
+                <div class="st-btn-group">
+                    <button id="st-btn-global" class="st-intimacy-btn" title="计算所有角色的总数据">🌍 全局统计</button>
+                    <button class="st-close-btn" id="st-close-overlay">×</button>
+                </div>
+            </div>
+            
+            <div class="st-intimacy-body">
+                <div id="st-intimacy-loading" style="display:none;">
+                    <div class="loading-spinner"><i class="fa-solid fa-circle-notch fa-spin"></i></div>
+                    <div id="st-loading-text">正在读取数据...</div>
+                </div>
+
+                <div class="st-stats-grid">
+                    <div class="st-stat-card">
+                        <div class="st-stat-label">初次相遇</div>
+                        <div class="st-stat-value" style="font-size:1.2rem">${s.firstDate}</div>
+                        <div class="st-stat-sub">距今 ${s.daysSince} 天</div>
+                    </div>
+                    <div class="st-stat-card">
+                        <div class="st-stat-label">活跃天数</div>
+                        <div class="st-stat-value">${s.activeDays}</div>
+                        <div class="st-stat-sub">天</div>
+                    </div>
+                    <div class="st-stat-card">
+                        <div class="st-stat-label">消息总数</div>
+                        <div class="st-stat-value">${s.totalMessages}</div>
+                        <div class="st-stat-sub">${(s.totalChars / 10000).toFixed(1)}万 字</div>
+                    </div>
+                    <div class="st-stat-card">
+                        <div class="st-stat-label">重Roll次数</div>
+                        <div class="st-stat-value">${s.totalRerolls}</div>
+                        <div class="st-stat-sub">命运分歧</div>
+                    </div>
+                </div>
+
+                <div class="st-calendar-container">
+                    <div class="st-calendar-nav">
+                        <button class="st-intimacy-btn" id="st-cal-prev">◀</button>
+                        <div class="st-month-title" id="st-cal-title">...</div>
+                        <button class="st-intimacy-btn" id="st-cal-next">▶</button>
+                    </div>
+                    <div id="st-cal-grid" class="st-month-grid"></div>
+                </div>
+            </div>
+        </div>
+        <div id="st-heatmap-tooltip"></div>
+    </div>
+    `;
+
+    $('body').append(html);
+    $('#st-intimacy-overlay').css('display', 'flex');
+
+    // 绑定事件
+    $('#st-close-overlay').click(() => $('#st-intimacy-overlay').remove());
+    $('#st-intimacy-overlay').click((e) => {
+        if (e.target.id === 'st-intimacy-overlay') $('#st-intimacy-overlay').remove();
+    });
+
+    $('#st-cal-prev').click(() => {
+        if (intimacyState.currentMonthIndex < intimacyState.calendarMonths.length - 1) {
+            intimacyState.currentMonthIndex++;
+            renderMonth();
+        }
+    });
+
+    $('#st-cal-next').click(() => {
+        if (intimacyState.currentMonthIndex > 0) {
+            intimacyState.currentMonthIndex--;
+            renderMonth();
+        }
+    });
+
+    // 切换全局统计
+    $('#st-btn-global').click(async () => {
+        if (!confirm("全局统计需要读取所有角色的所有聊天记录，可能会花费一些时间（取决于文件数量）。是否继续？")) return;
+        
+        $('#st-intimacy-loading').show();
+        $('#st-btn-global').hide(); // 隐藏按钮防止重复点击
+        
+        // 延迟一下让UI渲染Loading
+        setTimeout(async () => {
+            try {
+                const msgs = await getGlobalMessages((done, total) => {
+                    $('#st-loading-text').text(`正在分析角色 (${done}/${total})...`);
+                });
+                
+                $('#st-loading-text').text("正在生成热力图...");
+                const globalStats = calculateStats(msgs);
+                
+                if (globalStats) {
+                    intimacyState.stats = globalStats;
+                    intimacyState.calendarMonths = globalStats.calendarMonths;
+                    intimacyState.currentMonthIndex = 0;
+                    
+                    // 重新渲染整个 Modal (简单粗暴的方法来更新所有数据)
+                    $('#st-intimacy-overlay').remove();
+                    renderModalUI(`全局统计 (共 ${globalStats.activeDays} 天活跃)`);
+                    $('#st-btn-global').hide(); // 全局模式下不再显示全局按钮
+                } else {
+                    alert("未找到有效数据");
+                    $('#st-intimacy-loading').hide();
+                }
+            } catch (e) {
+                console.error(e);
+                alert("统计失败: " + e.message);
+                $('#st-intimacy-loading').hide();
+            }
+        }, 100);
+    });
+
+    renderMonth();
+}
+
+function renderMonth() {
+    const months = intimacyState.calendarMonths;
+    const idx = intimacyState.currentMonthIndex;
+    
+    if (!months || months.length === 0) {
+        $('#st-cal-grid').html('<div style="grid-column:1/-1;text-align:center;padding:20px">无数据</div>');
+        return;
+    }
+
+    const mData = months[idx];
+    $('#st-cal-title').text(`${mData.year}年 ${mData.month}月`);
+    
+    // 更新按钮状态
+    $('#st-cal-prev').prop('disabled', idx >= months.length - 1);
+    $('#st-cal-next').prop('disabled', idx <= 0);
+
+    let html = '';
+    // Header
+    const days = ['日','一','二','三','四','五','六'];
+    days.forEach(d => html += `<div class="st-day-header">${d}</div>`);
+    
+    // Padding
+    for(let i=0; i<mData.paddingStart; i++) html += `<div class="st-day-cell padding"></div>`;
+    
+    // Days
+    mData.days.forEach(d => {
+        const hasData = d.count > 0;
+        const cls = hasData ? `has-data level-${d.level}` : '';
+        html += `<div class="st-day-cell ${cls}" 
+                  data-date="${d.dateStr}" 
+                  data-count="${d.count}" 
+                  data-chars="${d.chars}">${d.dayNum}</div>`;
+    });
+
+    $('#st-cal-grid').html(html);
+
+    // Tooltip Events
+    $('.st-day-cell.has-data').on('mouseenter', function(e) {
+        const $t = $(this);
+        $('#st-heatmap-tooltip').html(`
+            <strong>${$t.data('date')}</strong><br>
+            💬 消息: ${$t.data('count')}<br>
+            📝 字数: ${$t.data('chars')}
+        `).show();
+        moveTooltip(e);
+    }).on('mouseleave', () => $('#st-heatmap-tooltip').hide())
+      .on('mousemove', moveTooltip);
+}
+
+function moveTooltip(e) {
+    const $tip = $('#st-heatmap-tooltip');
+    let x = e.clientX + 15;
+    let y = e.clientY + 15;
+    // 简单防溢出
+    if (x + $tip.width() > $(window).width()) x -= ($tip.width() + 30);
+    $tip.css({top: y, left: x});
+}
+
+// === 6. 主入口 ===
+async function openIntimacyHeatmap() {
+    const context = getContext();
+    const charId = context.characterId;
+    
+    // 如果没有选择角色，直接询问是否进行全局统计
+    if (charId === undefined || charId === null) {
+        if(confirm("当前未加载角色。是否进行全员【全局统计】？")) {
+            $('#st-btn-global').click(); // 模拟点击逻辑需要在UI渲染后，这里我们直接调用逻辑
+            // 为了复用代码，先渲染一个空的Loading状态UI
+            intimacyState.stats = { firstDate:'-', daysSince:0, activeDays:0, totalMessages:0, totalChars:0, totalRerolls:0 };
+            renderModalUI("全局数据加载中...");
+            $('#st-btn-global').click(); // 触发加载
+        }
+        return;
+    }
+
+    // 加载当前角色数据
+    const charName = context.characters[charId].name;
+    const avatar = context.characters[charId].avatar;
+    
+    // 显示简单的 Loading toast
+    toastr.info(`正在读取 ${charName} 的历史记录...`);
+    
+    const msgs = await getCharacterMessages(avatar);
+    const stats = calculateStats(msgs);
+    
+    if (stats) {
+        intimacyState.stats = stats;
+        intimacyState.calendarMonths = stats.calendarMonths;
+        intimacyState.currentMonthIndex = 0;
+        renderModalUI(`${charName} 的情感档案`);
+    } else {
+        toastr.warning("未找到该角色的聊天记录");
+    }
+}
+
+jQuery(async () => {
+    // 加载 CSS
+    $('head').append(`<link rel="stylesheet" type="text/css" href="${extensionCss}">`);
+
+    // 添加菜单按钮 (参考 index.js 的样式)
+    const menuBtn = `
+        <div id="st-intimacy-trigger" class="list-group-item" style="cursor:pointer; display:flex; align-items:center;">
+            <span style="margin-right:10px; width:20px; text-align:center;">
+                <i class="fa-solid fa-heart-pulse" style="color: #e91e63;"></i>
+            </span>
+            <span>情感档案</span>
+        </div>
+    `;
+
+    // 延时注入，确保 #extensionsMenu 存在
+    const intv = setInterval(() => {
+        if ($('#extensionsMenu').length > 0) {
+            $('#extensionsMenu').append(menuBtn);
+            clearInterval(intv);
+            
+            // 绑定点击事件
+            $('#st-intimacy-trigger').on('click', openIntimacyHeatmap);
+        }
+    }, 500);
+
+    console.log(`${extensionName} loaded.`);
+});

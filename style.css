@@ -1,197 +1,243 @@
-/* 模态框背景 */
-.intimacy-plugin-overlay {
+/* 模态框遮罩 */
+#st-intimacy-modal {
+    display: none;
     position: fixed;
-    top: 0; left: 0; right: 0; bottom: 0;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
     background: rgba(0, 0, 0, 0.7);
-    z-index: 9999;
-    display: flex;
+    z-index: 20000;
     align-items: center;
     justify-content: center;
-    backdrop-filter: blur(2px);
 }
 
-/* 模态框主体 */
-.intimacy-plugin-dialog {
-    background: var(--SmartThemeBlurBG, #1e1e1e);
-    border: 1px solid var(--SmartThemeBorderColor, #444);
-    border-radius: 10px;
+.st-intimacy-dialog {
+    background: #1e1e1e;
+    border: 1px solid #444;
+    border-radius: 8px;
     width: 90%;
     max-width: 700px;
     max-height: 90vh;
     display: flex;
     flex-direction: column;
-    color: var(--SmartThemeBodyColor, #e0e0e0);
-    box-shadow: 0 10px 40px rgba(0,0,0,0.5);
+    color: #e0e0e0;
     font-family: sans-serif;
+    box-shadow: 0 10px 40px rgba(0,0,0,0.5);
 }
 
-.intimacy-header {
-    padding: 1rem;
-    border-bottom: 1px solid var(--SmartThemeBorderColor, #444);
+.st-intimacy-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
+    padding: 1rem 1.25rem;
+    border-bottom: 1px solid #333;
 }
 
-.intimacy-header h3 {
+.st-intimacy-header h3 {
     margin: 0;
-    display: flex;
-    align-items: center;
-    gap: 10px;
+    font-size: 1.2rem;
+    color: #f48fb1; /* 粉色主题 */
 }
 
-.intimacy-close-btn {
-    background: transparent;
+.st-intimacy-close {
+    background: none;
     border: none;
-    color: var(--SmartThemeBodyColor, #ccc);
     font-size: 1.5rem;
+    color: #aaa;
     cursor: pointer;
 }
 
-.intimacy-body {
-    padding: 1.5rem;
+.st-intimacy-body {
+    padding: 1.25rem;
     overflow-y: auto;
 }
 
-/* 统计卡片 Grid */
-.intimacy-stats-grid {
+/* 统计卡片网格 */
+.st-stats-grid {
     display: grid;
     grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
     gap: 1rem;
     margin-bottom: 2rem;
 }
 
-.intimacy-stat-card {
-    background: var(--SmartThemebgTint, rgba(0,0,0,0.2));
+.st-stat-card {
+    background: #252525;
     padding: 1rem;
-    border-radius: 8px;
+    border-radius: 4px;
     text-align: center;
-    border: 1px solid var(--SmartThemeBorderColor, #444);
+    border: 1px solid #444;
     transition: transform 0.2s;
 }
 
-.intimacy-stat-card:hover {
-    transform: translateY(-2px);
+.st-stat-card:hover {
     border-color: #e91e63;
+    transform: translateY(-2px);
 }
 
-.intimacy-stat-label {
+.st-stat-label {
     font-size: 0.85rem;
-    opacity: 0.7;
+    color: #aaa;
     margin-bottom: 0.5rem;
 }
 
-.intimacy-stat-value {
+.st-stat-value {
     font-size: 1.4rem;
     font-weight: 800;
-    color: #e91e63; /* 核心主题色 */
-    line-height: 1.2;
+    color: #e0e0e0;
 }
 
-.intimacy-stat-sub {
+.st-stat-sub {
     font-size: 0.75rem;
-    opacity: 0.5;
-    margin-top: 0.4rem;
+    color: #666;
+    margin-top: 0.25rem;
 }
 
-/* 日历热力图部分 */
-.intimacy-calendar-section {
-    border-top: 1px solid var(--SmartThemeBorderColor, #444);
+/* 日历区域 */
+.st-calendar-section {
+    border-top: 1px solid #333;
     padding-top: 1.5rem;
 }
 
-.intimacy-calendar-nav {
+.st-calendar-header-row {
     display: flex;
     justify-content: space-between;
     align-items: center;
     margin-bottom: 1rem;
-    background: var(--SmartThemebgTint, rgba(0,0,0,0.1));
-    padding: 0.5rem;
-    border-radius: 5px;
 }
 
-.intimacy-nav-btn {
-    background: var(--SmartThemeInputColor, #333);
-    border: 1px solid var(--SmartThemeBorderColor, #555);
-    color: var(--SmartThemeBodyColor, #fff);
-    width: 30px; height: 30px;
-    cursor: pointer;
-    border-radius: 4px;
-}
-
-.intimacy-nav-btn:hover {
-    background: #e91e63;
-    border-color: #e91e63;
-}
-
-.intimacy-month-grid {
-    display: grid;
-    grid-template-columns: repeat(7, 1fr);
+.st-heatmap-legend {
+    display: flex;
+    align-items: center;
     gap: 4px;
+    font-size: 0.75rem;
+    color: #888;
+}
+
+.st-legend-item {
+    width: 10px;
+    height: 10px;
+    display: inline-block;
+}
+
+/* 日历控件 */
+.st-calendar-widget {
+    background: #252525;
+    border: 1px solid #444;
+    border-radius: 4px;
     max-width: 400px;
     margin: 0 auto;
+    overflow: hidden;
 }
 
-.intimacy-day-header {
-    text-align: center;
-    font-size: 0.75rem;
-    opacity: 0.6;
-    padding-bottom: 5px;
+.st-calendar-nav {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.75rem;
+    background: #2d2d2d;
+    border-bottom: 1px solid #444;
 }
 
-.intimacy-day-cell {
-    aspect-ratio: 1;
-    border-radius: 3px;
-    background: rgba(255,255,255,0.05);
+.st-nav-btn {
+    background: #333;
+    border: 1px solid #555;
+    color: #ccc;
+    width: 28px;
+    height: 28px;
+    cursor: pointer;
     display: flex;
     align-items: center;
     justify-content: center;
+}
+
+.st-nav-btn:hover:not(:disabled) {
+    background: #e0e0e0;
+    color: #121212;
+}
+
+.st-month-label {
+    font-weight: 700;
+    color: #e0e0e0;
+}
+
+.st-month-grid {
+    display: grid;
+    grid-template-columns: repeat(7, 1fr);
+    gap: 4px;
+    padding: 1rem;
+}
+
+.st-weekday-header {
+    text-align: center;
     font-size: 0.75rem;
-    color: rgba(255,255,255,0.3);
-    position: relative;
+    color: #888;
+    padding-bottom: 4px;
+}
+
+.st-day-cell {
+    aspect-ratio: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #2f2f2f;
+    font-size: 0.75rem;
+    color: #666;
     cursor: default;
+    position: relative;
 }
 
-.intimacy-day-cell.has-data {
-    cursor: pointer;
-    color: #fff;
-    font-weight: bold;
+.st-day-cell.padding { background: transparent; }
+
+/* 颜色等级 */
+.level-0 { background-color: #2f2f2f; }
+.level-1 { background-color: #5c2b3b; color: #ffcdd2; }
+.level-2 { background-color: #a04264; color: #fff; }
+.level-3 { background-color: #e91e63; color: #fff; }
+.level-4 { background-color: #ff80ab; color: #000; }
+
+.st-day-cell.has-data { cursor: pointer; }
+.st-day-cell.has-data:hover {
+    transform: scale(1.15);
+    z-index: 2;
+    border: 1px solid #fff;
 }
 
-/* 热力图等级颜色 */
-.intimacy-level-1 { background-color: #5c2b3b; color: #ffcdd2; }
-.intimacy-level-2 { background-color: #a04264; color: #fff; }
-.intimacy-level-3 { background-color: #e91e63; color: #fff; }
-.intimacy-level-4 { background-color: #ff80ab; color: #000; }
+.st-footer-stats {
+    display: flex;
+    justify-content: center;
+    gap: 1.5rem;
+    padding: 0.75rem;
+    background: #2d2d2d;
+    border-top: 1px solid #444;
+    font-size: 0.8rem;
+}
 
-/* 悬浮 Tooltip */
-.intimacy-tooltip {
-    position: absolute;
-    bottom: 100%;
-    left: 50%;
-    transform: translateX(-50%);
-    background: rgba(0,0,0,0.9);
-    padding: 5px 8px;
-    border-radius: 4px;
-    font-size: 0.7rem;
-    white-space: nowrap;
-    pointer-events: none;
-    z-index: 10;
-    display: none;
+.st-footer-val { color: #f48fb1; font-weight: bold; margin-left: 5px; }
+
+/* Tooltip */
+#st-heatmap-tooltip {
+    position: fixed;
+    background: rgba(0, 0, 0, 0.9);
     border: 1px solid #555;
+    color: #fff;
+    padding: 8px 12px;
+    border-radius: 4px;
+    font-size: 0.8rem;
+    pointer-events: none;
+    z-index: 21000;
+    display: none;
+    backdrop-filter: blur(4px);
+    box-shadow: 0 4px 10px rgba(0,0,0,0.5);
 }
 
-.intimacy-day-cell:hover .intimacy-tooltip {
-    display: block;
-}
-
-/* 顶部按钮样式 */
-.intimacy-top-btn {
-    cursor: pointer;
-    opacity: 0.7;
-    transition: all 0.2s;
-}
-.intimacy-top-btn:hover {
-    opacity: 1;
-    color: #e91e63;
+.st-loading-overlay {
+    position: absolute;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10;
+    color: #fff;
 }
