@@ -10,7 +10,7 @@ let intimacyState = {
     stats: null
 };
 
-// === 1. 并发控制器 ===
+// === 1. 并发控制器 (Utility) ===
 async function asyncPool(poolLimit, array, iteratorFn, onProgress) {
     const ret = [];
     const executing = [];
@@ -35,7 +35,7 @@ async function asyncPool(poolLimit, array, iteratorFn, onProgress) {
     return Promise.all(ret);
 }
 
-// === 2. 日期解析 ===
+// === 2. 日期解析 (Utility) ===
 const monthMap = {
     Jan: '01', January: '01', Feb: '02', February: '02', Mar: '03', March: '03',
     Apr: '04', April: '04', May: '05', Jun: '06', June: '06',
@@ -69,155 +69,86 @@ function parseSTDate(dateString) {
     return isNaN(d.getTime()) ? null : d;
 }
 
-// === 3. 核心数据获取逻辑 (DEBUG 版) ===
+// === 3. 核心数据获取逻辑 (FIXED based on reference.js) ===
 
-async function parseResponseJson(res) {
-    const text = await res.text();
-    if (text.trim().startsWith("<!DOCTYPE") || text.trim().startsWith("<html")) return [];
-    
-    const lines = text.trim().split('\n');
-    const messages = [];
-    lines.forEach(line => {
-        try {
-            const json = JSON.parse(line);
-            if (json.send_date) messages.push(json);
-        } catch(e) { }
-    });
-    return messages;
-}
-
-function parseTextData(text) {
-    if (!text || typeof text !== 'string') return [];
-    if (text.trim().startsWith("<!DOCTYPE")) return [];
-    
-    const lines = text.trim().split('\n');
-    const messages = [];
-    lines.forEach(line => {
-        try {
-            const json = JSON.parse(line);
-            if (json.send_date) messages.push(json);
-        } catch(e) { }
-    });
-    return messages;
+async function parseResponseText(res) {
+    try {
+        const text = await res.text();
+        if (text.trim().startsWith("<!DOCTYPE") || text.trim().startsWith("<html")) return [];
+        
+        const lines = text.trim().split('\n');
+        const messages = [];
+        
+        lines.forEach(line => {
+            try {
+                const json = JSON.parse(line);
+                // reference checks send_date logic internally, we just ensure it's a valid object
+                if (json) messages.push(json); 
+            } catch(e) { }
+        });
+        return messages;
+    } catch (e) {
+        console.error("Error parsing chat file text:", e);
+        return [];
+    }
 }
 
 async function fetchChatFileContent(folderNameFromId, fileName) {
-    // === DEBUG LOGS START ===
-    console.groupCollapsed(`[DEBUG] Fetching: ${fileName}`);
-    console.log(`Input folderName: "${folderNameFromId}"`);
-    console.log(`Input fileName: "${fileName}"`);
-    // === DEBUG LOGS END ===
-
-    const encodedFolder = encodeURIComponent(folderNameFromId);
     const encodedFileName = encodeURIComponent(fileName);
 
-    
-    // --- 方案 A ---
-    let urlA = `/chats/${folderNameFromId}/${encodedFileName}`;
-    console.log(`[DEBUG] Trying Path A: ${urlA}`); // 打印拼接好的 URL
-
-    try {
-        let res = await fetch(urlA, { method: 'GET', credentials: 'same-origin' });
-        if (res.ok) {
-            console.log(`[DEBUG] Path A Success!`);
-            console.groupEnd();
-            return await parseResponseJson(res);
-        }
-        console.warn(`[DEBUG] Path A Failed (${res.status})`);
-
-        // --- 方案 B ---
-        const charNameFromFill = fileName.split(' - ')[0];
-        // 只有当拆分出来的名字看起来合理时才尝试
-        if (charNameFromFill && charNameFromFill.length > 0 && charNameFromFill !== fileName) {
-            const encodedFolderB = encodeURIComponent(charNameFromFill);
-            const urlB = `/chats/${encodedFolderB}/${encodedFileName}`;
-            console.log(`[DEBUG] Trying Path B: ${urlB}`); // 打印 URL B
-
-            res = await fetch(urlB, { method: 'GET', credentials: 'same-origin' });
+    // --- Attempt 1: Use characterId (avatar folder name) ---
+    // Reference: "Attempt 1 using characterId... Derived folder name from ID"
+    if (folderNameFromId) {
+        const encodedFolder = encodeURIComponent(folderNameFromId);
+        const path1 = `/chats/${encodedFolder}/${encodedFileName}`;
+        
+        try {
+            const res = await fetch(path1, { method: 'GET', credentials: 'same-origin' });
             if (res.ok) {
-                console.log(`[DEBUG] Path B Success!`);
-                console.groupEnd();
-                return await parseResponseJson(res);
+                return await parseResponseText(res);
             }
-            console.warn(`[DEBUG] Path B Failed (${res.status})`);
-        } else {
-            console.log(`[DEBUG] Skipping Path B (Filename pattern match failed: "${charNameFromFill}")`);
+        } catch (e) {
+            // Check next attempt silently
         }
-
-        // --- 方案 C (API) ---
-        console.log(`[DEBUG] Trying API Fallback (jQuery POST)...`);
-        console.log(`[DEBUG] API Payload: ch_name="${folderNameFromId}", file_name="${fileName}"`);
-
-        return new Promise((resolve) => {
-            $.post('/api/chats/get', { 
-                ch_name: folderNameFromId, 
-                file_name: fileName 
-            })
-            .done((data) => {
-                console.log(`[DEBUG] API Success! Data length: ${data.length}`);
-                console.groupEnd();
-                resolve(parseTextData(data));
-            })
-            .fail((xhr, status, error) => {
-                console.error(`[DEBUG] API Failed. Status: ${xhr.status}, Error: ${error}`);
-                
-                // API 第一次失败，尝试用解析出的名字再试一次
-                if (charNameFromFill && charNameFromFill !== folderNameFromId) {
-                    console.log(`[DEBUG] Retrying API with ch_name="${charNameFromFill}"...`);
-                    $.post('/api/chats/get', { 
-                        ch_name: charNameFromFill, 
-                        file_name: fileName 
-                    })
-                    .done((data) => {
-                         console.log(`[DEBUG] API Retry Success!`);
-                         console.groupEnd();
-                         resolve(parseTextData(data));
-                    })
-                    .fail(() => {
-                        console.error(`[DEBUG] API Retry Failed.`);
-                        console.groupEnd();
-                        resolve([]);
-                    });
-                } else {
-                    console.groupEnd();
-                    resolve([]);
-                }
-            });
-        });
-
-    } catch (e) {
-        console.error(`[DEBUG] Critical error fetching ${fileName}`, e);
-        console.groupEnd();
-        return [];
     }
+
+    // --- Attempt 2: Use encoded character name from filename ---
+    // Reference: "Attempt 2 (Fallback): Use encoded character name from filename"
+    const charNameFromFill = fileName.split(' - ')[0];
+    if (charNameFromFill && charNameFromFill.length > 0 && charNameFromFill !== fileName) {
+        const encodedFolderB = encodeURIComponent(charNameFromFill);
+        const path2 = `/chats/${encodedFolderB}/${encodedFileName}`;
+
+        try {
+            const res = await fetch(path2, { method: 'GET', credentials: 'same-origin' });
+            if (res.ok) {
+                return await parseResponseText(res);
+            }
+        } catch (e) {
+            // Failed
+        }
+    }
+
+    return [];
 }
 
 async function getCharacterMessages(charIndex, avatarFileName) {
     try {
         const chats = await getPastCharacterChats(charIndex);
         
-        // === DEBUG: 打印原始列表 ===
-        console.log(`[DEBUG] Raw chat list for index ${charIndex} (${avatarFileName}):`, chats);
-        
         if (!chats || !Array.isArray(chats) || chats.length === 0) {
-            console.warn(`[Intimacy] No chat history found for index: ${charIndex}`);
             return [];
         }
 
-        // 提取文件夹名
+        // Logic from reference.js: extract folder name from avatar ID
         const lastDotIndex = avatarFileName.lastIndexOf('.');
         const folderName = lastDotIndex > 0 ? avatarFileName.substring(0, lastDotIndex) : avatarFileName;
         
-        console.log(`[DEBUG] Derived folderName for fetch: "${folderName}"`);
-
         const allFileMessages = await asyncPool(5, chats, async (chatMeta) => {
-            // 这里我们传入从 ID 推断出的文件夹名，和列表里给出的文件名
             return await fetchChatFileContent(folderName, chatMeta.file_name);
         });
 
-        const flattened = allFileMessages.flat();
-        console.log(`[Intimacy] Loaded ${flattened.length} messages for ${avatarFileName}`);
-        return flattened;
+        return allFileMessages.flat();
     } catch (e) {
         console.error(`[Intimacy] Error processing character ${avatarFileName}:`, e);
         return [];
@@ -228,7 +159,6 @@ async function getCharacterMessages(charIndex, avatarFileName) {
 async function getGlobalMessages(onProgress) {
     const context = getContext();
     if (!context || !context.characters) {
-        console.error("[Intimacy] Context not found or characters empty.");
         return [];
     }
 
@@ -237,8 +167,6 @@ async function getGlobalMessages(onProgress) {
         .map((char, index) => ({ char, index }))
         .filter(task => task.char && task.char.avatar && typeof task.char.avatar === 'string');
     
-    console.log(`[Intimacy] Starting global scan for ${validTasks.length} characters.`);
-
     const results = await asyncPool(3, validTasks, async (task) => {
         return await getCharacterMessages(task.index, task.char.avatar);
     }, onProgress);
@@ -252,7 +180,8 @@ function calculateStats(messages) {
 
     const validMessages = [];
     messages.forEach(m => {
-        if (parseSTDate(m.send_date)) validMessages.push(m);
+        // Simple check to ensure it has a date
+        if (m.send_date && parseSTDate(m.send_date)) validMessages.push(m);
     });
 
     if (validMessages.length === 0) return null;
@@ -450,7 +379,7 @@ function renderModalUI(title) {
                     renderModalUI(`全局统计 (共 ${globalStats.activeDays} 天活跃)`);
                     $('#st-btn-global').hide();
                 } else {
-                    toastr.warning("未找到有效数据，请检查控制台日志");
+                    toastr.warning("未找到有效数据");
                     $('#st-intimacy-loading').hide();
                     $btn.prop('disabled', false).text('🌍 全局统计');
                 }
@@ -548,7 +477,7 @@ async function openIntimacyHeatmap() {
         intimacyState.currentMonthIndex = 0;
         renderModalUI(`${charName} 的情感档案`);
     } else {
-        toastr.warning("未找到该角色的聊天记录 (或日期无法解析)");
+        toastr.warning("未找到该角色的聊天记录");
     }
 }
 
@@ -574,5 +503,5 @@ jQuery(async () => {
         }
     }, 500);
 
-    console.log(`${extensionName} loaded (Debug Mode).`);
+    console.log(`${extensionName} loaded.`);
 });
