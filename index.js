@@ -1,6 +1,6 @@
 /*
-    SillyTavern Extension: Intimacy Heatmap (Ultimate Global Version)
-    Features: Single Character History & Global All-Characters Stats
+    SillyTavern Extension: Intimacy Heatmap (Bottom Button Version)
+    Features: Button moved to Quick Reply area (like Custom Prompt Kity)
 */
 
 (function () {
@@ -107,14 +107,15 @@
 
         // 日历数据生成
         const firstDateObj = parseSTDate(sortedMsgs[0].send_date);
-        const lastDateObj = new Date(); 
+        // const lastDateObj = new Date(); 
         const monthsData = [];
         
         if (firstDateObj) {
             let currentYear = firstDateObj.getFullYear();
             let currentMonth = firstDateObj.getMonth();
-            const endYear = lastDateObj.getFullYear();
-            const endMonth = lastDateObj.getMonth();
+            const now = new Date();
+            const endYear = now.getFullYear();
+            const endMonth = now.getMonth();
 
             while (currentYear < endYear || (currentYear === endYear && currentMonth <= endMonth)) {
                 const daysInMonth = new Date(currentYear, currentMonth + 1, 0).getDate();
@@ -134,7 +135,7 @@
                     
                     let level = 0;
                     if (data.count > 0) level = 1;
-                    if (data.count > 50) level = 2; // 全局统计阈值适当提高
+                    if (data.count > 50) level = 2;
                     if (data.count > 150) level = 3;
                     if (data.count > 300) level = 4;
 
@@ -183,13 +184,11 @@
 
     // === 数据获取逻辑 ===
 
-    // 获取单个角色的所有聊天文件内容
     async function fetchAllChatsForCharacter(avatarUrl) {
         try {
             const chatList = await jQuery.post('/api/chats/list', { avatar_url: avatarUrl });
             if (!chatList || !Array.isArray(chatList) || chatList.length === 0) return [];
 
-            // 并发获取该角色的所有聊天，限制并发数为 5
             const results = await asyncPool(5, chatList, (fileName) => {
                 return jQuery.post('/api/chats/get', { avatar_url: avatarUrl, file_name: fileName })
                     .then(data => Array.isArray(data) ? data : [])
@@ -203,7 +202,6 @@
         }
     }
 
-    // 更新 Loading 提示文字
     function updateLoadingText(text, subtext = "") {
         const $loading = $('#intimacy-loading');
         if ($loading.length) {
@@ -212,34 +210,22 @@
         }
     }
 
-    // 获取所有角色的数据（全局模式）
     async function fetchGlobalData() {
         const characters = SillyTavern.getContext().characters;
-        // 过滤出有效的角色（排除 null 或无效项）
         const validChars = characters.filter(c => c && c.avatar);
         const totalChars = validChars.length;
         
-        let allMessages = [];
-        let processedCount = 0;
-
         updateLoadingText(`准备读取 ${totalChars} 个角色...`);
 
-        // 使用 asyncPool 限制并发角色数为 3 (每个角色内部还会并发5个请求，所以总并发大概15左右，避免炸服)
         const charResults = await asyncPool(3, validChars, async (char) => {
             const msgs = await fetchAllChatsForCharacter(char.avatar);
             return msgs;
         }, (completed, total) => {
-            // 进度回调
             updateLoadingText(`正在读取角色 (${completed}/${total})`, `当前进度: ${Math.round(completed/total*100)}%`);
         });
 
-        // 合并结果
         updateLoadingText("正在合并时间线...", "即将完成");
-        // charResults 是一个数组，每个元素是该角色的消息数组 [ [msg, msg], [msg, msg] ]
-        // 使用 flat 展平
-        allMessages = charResults.flat();
-        
-        return allMessages;
+        return charResults.flat();
     }
 
     // === UI 构建 ===
@@ -329,7 +315,6 @@
     }
 
     function renderModal(title, stats) {
-        // 先移除旧的（如果有）
         $('#intimacy-overlay').remove();
         
         intimacyData.calendarMonths = stats.calendarMonths;
@@ -388,19 +373,16 @@
         $('body').append(modalHtml);
         const $overlay = $('#intimacy-overlay');
         
-        // 绑定事件
         $overlay.find('#intimacy-close').on('click', () => $overlay.remove());
         $overlay.on('click', (e) => {
             if (e.target.id === 'intimacy-overlay') $overlay.remove();
         });
 
-        // 切换到全局模式按钮
         $overlay.find('#btn-switch-global').on('click', async () => {
-            $overlay.remove(); // 关闭当前窗口
-            await initGlobalMode(); // 开启全局模式
+            $overlay.remove(); 
+            await initGlobalMode();
         });
 
-        // 翻页逻辑
         $overlay.find('#btn-next-month').on('click', () => {
              if (intimacyData.currentMonthIndex < intimacyData.calendarMonths.length - 1) {
                  intimacyData.currentMonthIndex++;
@@ -448,11 +430,9 @@
     async function initGlobalMode() {
         showLoading();
         try {
-            // 获取所有数据
             const allMessages = await fetchGlobalData();
             
             updateLoadingText("正在生成热力图...");
-            // 给 UI 渲染留一点时间，防止界面卡死
             await new Promise(resolve => setTimeout(resolve, 100));
 
             const stats = calculateStats(allMessages);
@@ -463,8 +443,6 @@
                 return;
             }
             renderModal(`全员统计 (${stats.activeDays}天活跃)`, stats);
-            
-            // 全局模式下隐藏切换按钮，防止重复点击
             $('#btn-switch-global').hide();
             
         } catch (e) {
@@ -476,32 +454,41 @@
 
     async function handleTrigger() {
         const context = SillyTavern.getContext();
-        
-        // 如果当前有打开的角色，默认进入单人模式
         if (context.characterId) {
             await initCharacterMode();
         } else {
-            // 如果没打开角色，直接询问是否进行全局统计
             if(confirm("当前未打开任何对话。是否要进行【全角色全局统计】？\n警告：角色较多时可能需要较长时间。")) {
                 await initGlobalMode();
             }
         }
     }
 
-    // === 插件加载 ===
+    // === 插件加载 (Quick Reply Version) ===
     jQuery(document).ready(function () {
+        // 核心修改：寻找 Quick Reply 容器
+        const container = $('#quick-reply-container');
+
+        // 使用 qr--button 样式，使其看起来像原生按钮
+        // 在 icon 上加了 style="color: #e91e63;" 保持粉色爱心
         const btnHtml = `
-            <div class="intimacy-top-btn fa-solid fa-heart-pulse" id="intimacy-trigger" title="情感档案 / 全局统计"></div>
+            <div id="intimacy-trigger" class="qr--button" title="情感档案 / 全局统计" role="button" tabindex="0">
+                <i class="fa-solid fa-heart-pulse" style="color: #e91e63;"></i>
+            </div>
         `;
-        
-        if ($('#extensions-settings-button').length) {
-            $('#extensions-settings-button').before(btnHtml);
+
+        // 插入按钮
+        if (container.length) {
+            container.append(btnHtml);
         } else {
-            $('.drawer-toggle').last().after(btnHtml);
+            // 如果因为某种原因找不到 quick-reply-container，回退到 drawer-toggle 旁边（作为保险）
+            console.warn("Intimacy Heatmap: Could not find #quick-reply-container, falling back to top bar.");
+            $('.drawer-toggle').last().after(`
+                <div class="intimacy-top-btn fa-solid fa-heart-pulse" id="intimacy-trigger" title="情感档案"></div>
+            `);
         }
 
         $(document).on('click', '#intimacy-trigger', handleTrigger);
         
-        console.log(`${extensionName} loaded (Ultimate Version).`);
+        console.log(`${extensionName} loaded (Quick Reply Version).`);
     });
 })();
