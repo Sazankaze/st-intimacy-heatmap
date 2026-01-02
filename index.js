@@ -69,13 +69,12 @@ function parseSTDate(dateString) {
     return isNaN(d.getTime()) ? null : d;
 }
 
-// === 3. 核心数据获取逻辑 (修复参数类型错误) ===
+// === 3. 核心数据获取逻辑 (完全修复版) ===
 
 async function parseResponseJson(res) {
     const text = await res.text();
-    if (text.trim().startsWith("<!DOCTYPE") || text.trim().startsWith("<html")) {
-        return [];
-    }
+    if (text.trim().startsWith("<!DOCTYPE") || text.trim().startsWith("<html")) return [];
+    
     const lines = text.trim().split('\n');
     const messages = [];
     lines.forEach(line => {
@@ -87,83 +86,99 @@ async function parseResponseJson(res) {
     return messages;
 }
 
-// 修复版：不对文件夹名进行过度编码，增加详细调试日志
+// 解析 jQuery 返回的数据 (通常是 JSONL 字符串)
+function parseTextData(text) {
+    if (!text || typeof text !== 'string') return [];
+    if (text.trim().startsWith("<!DOCTYPE")) return [];
+    
+    const lines = text.trim().split('\n');
+    const messages = [];
+    lines.forEach(line => {
+        try {
+            const json = JSON.parse(line);
+            if (json.send_date) messages.push(json);
+        } catch(e) { }
+    });
+    return messages;
+}
+
 async function fetchChatFileContent(folderNameFromId, fileName) {
     const encodedFileName = encodeURIComponent(fileName);
     
-    // 【关键修复】不要对文件夹名进行 encodeURIComponent
-    // 浏览器会自动处理路径中的中文，手动编码反而会导致服务器找不到文件夹
-    // 方案 A: 使用 ID 推断的文件夹名 (例如: /chats/黑田葵/...)
+    // 方案 A: 静态路径 (Reference.js 逻辑 - 不编码文件夹名)
+    // 针对: /chats/黑田葵/file.jsonl
     let urlA = `/chats/${folderNameFromId}/${encodedFileName}`;
     
     try {
         let res = await fetch(urlA, { method: 'GET', credentials: 'same-origin' });
-        
-        if (res.ok) {
-            return await parseResponseJson(res);
-        } else {
-            console.warn(`[Intimacy] Path A failed (${res.status}): ${urlA}`);
-        }
+        if (res.ok) return await parseResponseJson(res);
+        // console.warn(`[Intimacy] Path A failed (${res.status}): ${urlA}`);
 
-        // 方案 B: 尝试从文件名提取 (例如文件名为 "黑田葵 - 2024.jsonl")
+        // 方案 B: 静态路径 (Reference.js 逻辑 - 编码文件夹名)
+        // 针对: /chats/%E9%BB%91.../file.jsonl
         const charNameFromFill = fileName.split(' - ')[0];
-        if (charNameFromFill && charNameFromFill !== folderNameFromId) {
-            // 同样，这里也不要 encodeURIComponent 文件夹名
-            const urlB = `/chats/${charNameFromFill}/${encodedFileName}`;
+        // 只有当拆分出来的名字看起来合理时才尝试，避免像 "2026-1-1..." 这种文件名导致错误的文件夹路径
+        if (charNameFromFill && charNameFromFill.length > 0 && charNameFromFill !== fileName) {
+            const encodedFolderB = encodeURIComponent(charNameFromFill);
+            const urlB = `/chats/${encodedFolderB}/${encodedFileName}`;
             
             res = await fetch(urlB, { method: 'GET', credentials: 'same-origin' });
-            if (res.ok) {
-                return await parseResponseJson(res);
-            } else {
-                console.warn(`[Intimacy] Path B failed (${res.status}): ${urlB}`);
-            }
-        }
-        
-        // 方案 C (兜底): 如果静态文件读不到，尝试使用 SillyTavern 的 API
-        // 这通常能解决所有路径编码问题
-        try {
-            const apiUrl = '/api/chats/get';
-            const apiRes = await fetch(apiUrl, {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({
-                    ch_name: folderNameFromId, // 或者是 charNameFromFill
-                    file_name: fileName
-                })
-            });
-            if (apiRes.ok) {
-                console.log(`[Intimacy] API Fallback success for ${fileName}`);
-                return await parseResponseJson(apiRes);
-            }
-        } catch(apiErr) {
-            console.warn("[Intimacy] API Fallback failed");
+            if (res.ok) return await parseResponseJson(res);
+            // console.warn(`[Intimacy] Path B failed (${res.status}): ${urlB}`);
         }
 
-        return [];
+        // 方案 C: API 兜底 (使用 jQuery 解决 403 Forbidden 问题) 
+        // 这是一个 Promise 包装器，因为 $.post 是基于回调的
+        return new Promise((resolve) => {
+            $.post('/api/chats/get', { 
+                ch_name: folderNameFromId, 
+                file_name: fileName 
+            })
+            .done((data) => {
+                // API 成功，数据通常是纯文本 (JSONL)
+                // console.log(`[Intimacy] API Fallback success for ${fileName}`);
+                resolve(parseTextData(data));
+            })
+            .fail((xhr) => {
+                // 如果第一次 API 失败，尝试用从文件名解析出的名字再试一次
+                if (charNameFromFill && charNameFromFill !== folderNameFromId) {
+                    $.post('/api/chats/get', { 
+                        ch_name: charNameFromFill, 
+                        file_name: fileName 
+                    })
+                    .done((data) => resolve(parseTextData(data)))
+                    .fail(() => {
+                        console.error(`[Intimacy] All methods failed for ${fileName}`);
+                        resolve([]);
+                    });
+                } else {
+                    console.error(`[Intimacy] API failed for ${fileName}: ${xhr.status}`);
+                    resolve([]);
+                }
+            });
+        });
+
     } catch (e) {
-        console.error(`[Intimacy] Network error fetching ${fileName}`, e);
+        console.error(`[Intimacy] Critical error fetching ${fileName}`, e);
         return [];
     }
 }
 
-// 【关键修复】现在接收 (角色索引, 头像文件名)
 async function getCharacterMessages(charIndex, avatarFileName) {
     try {
-        // 1. 获取文件列表：必须传 Index (数字)，不能传文件名！
         const chats = await getPastCharacterChats(charIndex);
         
         if (!chats || !Array.isArray(chats) || chats.length === 0) {
-            console.warn(`[Intimacy] No chat history found for index: ${charIndex} (${avatarFileName})`);
+            console.warn(`[Intimacy] No chat history found for index: ${charIndex}`);
             return [];
         }
 
         console.log(`[Intimacy] Found ${chats.length} chat files for ${avatarFileName}.`);
 
-        // 2. 构造文件夹名：需要用文件名 (字符串)
+        // 提取文件夹名
         const lastDotIndex = avatarFileName.lastIndexOf('.');
         const folderName = lastDotIndex > 0 ? avatarFileName.substring(0, lastDotIndex) : avatarFileName;
 
-        // 3. 下载内容
         const allFileMessages = await asyncPool(5, chats, async (chatMeta) => {
             return await fetchChatFileContent(folderName, chatMeta.file_name);
         });
@@ -186,8 +201,6 @@ async function getGlobalMessages(onProgress) {
     }
 
     const characters = context.characters;
-    
-    // 【关键修复】保留原始索引 (Index)，因为 getPastCharacterChats 需要它
     const validTasks = characters
         .map((char, index) => ({ char, index }))
         .filter(task => task.char && task.char.avatar && typeof task.char.avatar === 'string');
@@ -195,7 +208,6 @@ async function getGlobalMessages(onProgress) {
     console.log(`[Intimacy] Starting global scan for ${validTasks.length} characters.`);
 
     const results = await asyncPool(3, validTasks, async (task) => {
-        // 传入 Index 和 文件名
         return await getCharacterMessages(task.index, task.char.avatar);
     }, onProgress);
 
@@ -478,7 +490,7 @@ function moveTooltip(e) {
 // === 6. 主入口 ===
 async function openIntimacyHeatmap() {
     const context = getContext();
-    const charId = context.characterId; // 这里获取的是 Number 类型的索引 (0, 1, 2...)
+    const charId = context.characterId;
     
     if (charId === undefined || charId === null) {
         if(confirm("当前未加载角色。是否进行全员【全局统计】？")) {
@@ -490,11 +502,10 @@ async function openIntimacyHeatmap() {
     }
 
     const charName = context.characters[charId].name;
-    const avatar = context.characters[charId].avatar; // 这里获取的是文件名 "xxx.png"
+    const avatar = context.characters[charId].avatar;
     
     toastr.info(`正在读取 ${charName} 的历史记录...`);
     
-    // 【关键修复】同时传入 索引(查记录) 和 文件名(拼路径)
     const msgs = await getCharacterMessages(charId, avatar);
     
     const stats = calculateStats(msgs);
@@ -531,5 +542,5 @@ jQuery(async () => {
         }
     }, 500);
 
-    console.log(`${extensionName} loaded (Final Fix).`);
+    console.log(`${extensionName} loaded (jQuery API Fix).`);
 });
