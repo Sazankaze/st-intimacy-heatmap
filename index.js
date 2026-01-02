@@ -47,9 +47,6 @@ function parseSTDate(dateString) {
     if (!dateString) return null;
     if (typeof dateString === 'number') return new Date(dateString);
 
-    // 调试：如果发现日期解析有问题，取消下面这行的注释
-    // console.log("Parsing date:", dateString);
-
     // 1. 尝试 SillyTavern 标准格式 "Month Day, Year HH:MMam/pm"
     const parts = dateString.match(/(\w+)\s+(\d+),\s+(\d+)\s+(\d+):(\d+)(am|pm)/i);
     if (parts) {
@@ -70,101 +67,70 @@ function parseSTDate(dateString) {
         } catch(e) {}
     }
 
-    // 3. 暴力兜底：直接扔给浏览器解析 (ISO 格式等)
+    // 3. 暴力兜底：直接扔给浏览器解析
     const d = new Date(dateString);
     return isNaN(d.getTime()) ? null : d;
 }
 
-// === 3. 核心数据获取逻辑 (已修复) ===
+// === 3. 核心数据获取逻辑 (已修复权限问题) ===
+
+// 辅助函数：解析响应文本为 JSON 数组
+async function parseResponseJson(res) {
+    const text = await res.text();
+    // 验证是否误返回了 HTML
+    if (text.trim().startsWith("<!DOCTYPE") || text.trim().startsWith("<html")) {
+        return [];
+    }
+    const lines = text.trim().split('\n');
+    const messages = [];
+    lines.forEach(line => {
+        try {
+            const json = JSON.parse(line);
+            if (json.send_date) messages.push(json);
+        } catch(e) { }
+    });
+    return messages;
+}
 
 // 获取单个文件的内容
 async function fetchChatFileContent(folderNameFromId, fileName) {
     const encodedFileName = encodeURIComponent(fileName);
     
-    // 方案 A: 优先使用传入的文件夹名 (基于 Avatar ID 推断)
-    // 这里的 folderNameFromId 应该是类似 "Seraphina" (不带 .png)
+    // 方案 A: 优先使用 Avatar ID 推断的文件夹名
     const encodedFolderA = encodeURIComponent(folderNameFromId);
     let urlA = `/chats/${encodedFolderA}/${encodedFileName}`;
     
     try {
-        // 【关键修复 1】添加 credentials: 'same-origin'
+        // 关键修复：添加 credentials: 'same-origin'
         let res = await fetch(urlA, { method: 'GET', credentials: 'same-origin' });
         
-        // 如果方案 A 成功，直接处理
         if (res.ok) {
-            return await parseResponseJson(res, urlA);
+            return await parseResponseJson(res);
         }
 
-        // 方案 B: 如果 A 失败 (404)，尝试从聊天文件名中提取角色名作为文件夹
-        // Reference.js 的逻辑：很多时候文件夹名是角色名，而不是 Avatar 文件名
-        // 文件名格式通常是: "Character Name - 2023-01-01 @ 12h00m00s.jsonl"
+        // 方案 B: 尝试从文件名中提取角色名作为文件夹名
         const charNameFromFill = fileName.split(' - ')[0];
-        
         if (charNameFromFill && charNameFromFill !== folderNameFromId) {
             const encodedFolderB = encodeURIComponent(charNameFromFill);
             const urlB = `/chats/${encodedFolderB}/${encodedFileName}`;
             
-            // console.log(`[Intimacy] Path A failed, trying Path B: ${urlB}`);
             res = await fetch(urlB, { method: 'GET', credentials: 'same-origin' });
-            
             if (res.ok) {
-                return await parseResponseJson(res, urlB);
+                return await parseResponseJson(res);
             }
         }
         
-        console.warn(`[Intimacy] Failed to fetch chat file: ${fileName} (Tried: ${folderNameFromId} & ${charNameFromFill})`);
+        console.warn(`[Intimacy] Failed to fetch: ${fileName}`);
         return [];
-
     } catch (e) {
         console.error(`[Intimacy] Network error fetching ${fileName}`, e);
         return [];
     }
 }
 
-// 辅助函数：解析响应文本为 JSON 数组
-async function parseResponseJson(res, url) {
-    const text = await res.text();
-    // 验证是否误返回了 HTML (例如 404 页面)
-    if (text.trim().startsWith("<!DOCTYPE") || text.trim().startsWith("<html")) {
-        // console.error(`[Intimacy] Error: Server returned HTML instead of JSONL for ${url}`);
-        return [];
-    }
-
-    const lines = text.trim().split('\n');
-    const messages = [];
-    lines.forEach(line => {
-        try {
-            const json = JSON.parse(line);
-            if (json.send_date) messages.push(json);
-        } catch(e) { }
-    });
-    return messages;
-}
-
-// 辅助函数：解析响应文本为 JSON 数组
-async function parseResponseJson(res, url) {
-    const text = await res.text();
-    // 验证是否误返回了 HTML (例如 404 页面)
-    if (text.trim().startsWith("<!DOCTYPE") || text.trim().startsWith("<html")) {
-        // console.error(`[Intimacy] Error: Server returned HTML instead of JSONL for ${url}`);
-        return [];
-    }
-
-    const lines = text.trim().split('\n');
-    const messages = [];
-    lines.forEach(line => {
-        try {
-            const json = JSON.parse(line);
-            if (json.send_date) messages.push(json);
-        } catch(e) { }
-    });
-    return messages;
-}
-
 // 获取单个角色的所有聊天记录
 async function getCharacterMessages(avatarId) {
     try {
-        // 1. 获取文件列表 (SillyTavern 内部 API)
         const chats = await getPastCharacterChats(avatarId);
         
         if (!chats || !Array.isArray(chats) || chats.length === 0) {
@@ -174,12 +140,11 @@ async function getCharacterMessages(avatarId) {
 
         console.log(`[Intimacy] Found ${chats.length} chat files for ${avatarId}. Downloading content...`);
 
-        // 2. 计算文件夹名 (去除扩展名，例如 Seraphina.png -> Seraphina)
-        // 注意：这里假设文件夹名等于 ID。如果用户手动改过文件夹名，这里会挂。
+        // 计算文件夹名 (去除扩展名) - 增强健壮性
         const lastDotIndex = avatarId.lastIndexOf('.');
         const folderName = lastDotIndex > 0 ? avatarId.substring(0, lastDotIndex) : avatarId;
 
-        // 3. 并发读取
+        // 并发读取
         const allFileMessages = await asyncPool(5, chats, async (chatMeta) => {
             return await fetchChatFileContent(folderName, chatMeta.file_name);
         });
@@ -202,7 +167,6 @@ async function getGlobalMessages(onProgress) {
     }
 
     const characters = context.characters;
-    // 过滤掉无效角色 (avatar 字段不存在或者是 null 的)
     const validChars = characters.filter(c => c && c.avatar && typeof c.avatar === 'string');
     
     console.log(`[Intimacy] Starting global scan for ${validChars.length} characters.`);
@@ -218,28 +182,13 @@ async function getGlobalMessages(onProgress) {
 function calculateStats(messages) {
     if (!messages || messages.length === 0) return null;
 
-    // 过滤掉日期无效的消息 (但记入日志以便排查)
     const validMessages = [];
-    let invalidDateCount = 0;
-    
     messages.forEach(m => {
-        if (parseSTDate(m.send_date)) {
-            validMessages.push(m);
-        } else {
-            invalidDateCount++;
-        }
+        if (parseSTDate(m.send_date)) validMessages.push(m);
     });
 
-    if (invalidDateCount > 0) {
-        console.warn(`[Intimacy] Warning: ${invalidDateCount} messages were skipped due to unparsable date format. Check parseSTDate.`);
-    }
+    if (validMessages.length === 0) return null;
 
-    if (validMessages.length === 0) {
-        console.error("[Intimacy] No messages with valid dates found.");
-        return null;
-    }
-
-    // 按时间排序
     validMessages.sort((a, b) => parseSTDate(a.send_date) - parseSTDate(b.send_date));
 
     const dayMap = new Map();
@@ -278,9 +227,8 @@ function calculateStats(messages) {
     const endY = lastDate.getFullYear();
     const endM = lastDate.getMonth();
 
-    // 防止死循环保护 (例如日期解析错误导致年份极其久远)
     let loopGuard = 0;
-    while ((curY < endY || (curY === endY && curM <= endM)) && loopGuard < 1200) { // 最多统计100年
+    while ((curY < endY || (curY === endY && curM <= endM)) && loopGuard < 1200) {
         loopGuard++;
         const daysInMonth = new Date(curY, curM + 1, 0).getDate();
         const firstDayObj = new Date(curY, curM, 1);
@@ -331,7 +279,6 @@ function renderModalUI(title) {
     const s = intimacyState.stats;
     if (!s) return;
 
-    // 清理旧的
     $('#st-intimacy-overlay').remove();
 
     const html = `
@@ -554,11 +501,14 @@ jQuery(async () => {
 
     const intv = setInterval(() => {
         if ($('#extensionsMenu').length > 0) {
-            $('#extensionsMenu').append(menuBtn);
+            // 防止重复添加
+            if ($('#st-intimacy-trigger').length === 0) {
+                $('#extensionsMenu').append(menuBtn);
+                $('#st-intimacy-trigger').on('click', openIntimacyHeatmap);
+            }
             clearInterval(intv);
-            $('#st-intimacy-trigger').on('click', openIntimacyHeatmap);
         }
     }, 500);
 
-    console.log(`${extensionName} loaded (Debug Mode).`);
+    console.log(`${extensionName} loaded (Fixed Version).`);
 });
