@@ -149,30 +149,25 @@ async function fetchChatFileContent(folderNameFromAvatar, fileName) {
 
 async function getCharacterMessages(charIndex, avatarFileName) {
     try {
-        const chats = await getPastCharacterChats(charIndex);
-        
-        if (!chats || !Array.isArray(chats) || chats.length === 0) {
-            return [];
-        }
-
-        // 从头像文件名中提取基础文件夹名 (移除 .png 等后缀)
-        let folderName = avatarFileName;
-        const lastDotIndex = avatarFileName.lastIndexOf('.');
-        if (lastDotIndex > 0) {
-            folderName = avatarFileName.substring(0, lastDotIndex);
-        }
-        
-        const allFileMessages = await asyncPool(5, chats, async (chatMeta) => {
-            if (!chatMeta || !chatMeta.file_name) return [];
-            return await fetchChatFileContent(folderName, chatMeta.file_name);
-        });
-
-        return allFileMessages.flat();
+      // ✅ 不要用 charIndex
+      const chats = await getPastCharacterChats(avatarFileName);
+  
+      if (!chats || !Array.isArray(chats) || chats.length === 0) return [];
+  
+      const lastDotIndex = avatarFileName.lastIndexOf('.');
+      const folderName = lastDotIndex > 0 ? avatarFileName.substring(0, lastDotIndex) : avatarFileName;
+  
+      const allFileMessages = await asyncPool(5, chats, async (chatMeta) => {
+        return await fetchChatFileContent(folderName, chatMeta.file_name);
+      });
+  
+      return allFileMessages.flat();
     } catch (e) {
-        console.error(`[Intimacy] Error processing character ${avatarFileName}:`, e);
-        return [];
+      console.error(`[Intimacy] Error processing character ${avatarFileName}:`, e);
+      return [];
     }
-}
+  }
+  
 
 // 获取全局所有角色的聊天记录
 async function getGlobalMessages(onProgress) {
