@@ -69,20 +69,21 @@ function parseSTDate(dateString) {
     return isNaN(d.getTime()) ? null : d;
 }
 
-// === 3. 核心数据获取逻辑 (FIXED based on reference.js) ===
+// === 3. 核心数据获取逻辑 (FIXED) ===
 
 async function parseResponseText(res) {
     try {
         const text = await res.text();
-        if (text.trim().startsWith("<!DOCTYPE") || text.trim().startsWith("<html")) return [];
+        // 增加检查：如果返回的是 HTML (比如 404 页面)，则忽略
+        if (!text || text.trim().startsWith("<!DOCTYPE") || text.trim().startsWith("<html")) return [];
         
         const lines = text.trim().split('\n');
         const messages = [];
         
         lines.forEach(line => {
             try {
+                if (!line) return;
                 const json = JSON.parse(line);
-                // reference checks send_date logic internally, we just ensure it's a valid object
                 if (json) messages.push(json); 
             } catch(e) { }
         });
@@ -94,13 +95,18 @@ async function parseResponseText(res) {
 }
 
 async function fetchChatFileContent(folderNameFromId, fileName) {
+    // 安全检查：如果文件名不存在，直接返回空，防止后面 split 报错
+    if (!fileName) return [];
+
     const encodedFileName = encodeURIComponent(fileName);
 
     // --- Attempt 1: Use characterId (avatar folder name) ---
-    // Reference: "Attempt 1 using characterId... Derived folder name from ID"
+    // 修复：参考 reference.js，这里不应该对 folderNameFromId 进行 encodeURIComponent 编码
+    // SillyTavern 的静态文件服务可能期望原始字符串，或者已经在其他地方处理了
     if (folderNameFromId) {
-        const encodedFolder = encodeURIComponent(folderNameFromId);
-        const path1 = `/chats/${encodedFolder}/${encodedFileName}`;
+        // [FIXED] 移除了 const encodedFolder = encodeURIComponent(folderNameFromId);
+        // 直接使用 folderNameFromId 以保持与 reference.js 一致
+        const path1 = `/chats/${folderNameFromId}/${encodedFileName}`;
         
         try {
             const res = await fetch(path1, { method: 'GET', credentials: 'same-origin' });
@@ -114,19 +120,19 @@ async function fetchChatFileContent(folderNameFromId, fileName) {
 
     // --- Attempt 2: Use encoded character name from filename ---
     // Reference: "Attempt 2 (Fallback): Use encoded character name from filename"
-    const charNameFromFill = fileName.split(' - ')[0];
-    if (charNameFromFill && charNameFromFill.length > 0 && charNameFromFill !== fileName) {
-        const encodedFolderB = encodeURIComponent(charNameFromFill);
-        const path2 = `/chats/${encodedFolderB}/${encodedFileName}`;
+    try {
+        const charNameFromFill = fileName.split(' - ')[0];
+        if (charNameFromFill && charNameFromFill.length > 0 && charNameFromFill !== fileName) {
+            const encodedFolderB = encodeURIComponent(charNameFromFill);
+            const path2 = `/chats/${encodedFolderB}/${encodedFileName}`;
 
-        try {
             const res = await fetch(path2, { method: 'GET', credentials: 'same-origin' });
             if (res.ok) {
                 return await parseResponseText(res);
             }
-        } catch (e) {
-            // Failed
         }
+    } catch (e) {
+        // Failed
     }
 
     return [];
@@ -145,6 +151,8 @@ async function getCharacterMessages(charIndex, avatarFileName) {
         const folderName = lastDotIndex > 0 ? avatarFileName.substring(0, lastDotIndex) : avatarFileName;
         
         const allFileMessages = await asyncPool(5, chats, async (chatMeta) => {
+            // 确保 chatMeta 存在且有 file_name
+            if (!chatMeta || !chatMeta.file_name) return [];
             return await fetchChatFileContent(folderName, chatMeta.file_name);
         });
 
@@ -180,7 +188,6 @@ function calculateStats(messages) {
 
     const validMessages = [];
     messages.forEach(m => {
-        // Simple check to ensure it has a date
         if (m.send_date && parseSTDate(m.send_date)) validMessages.push(m);
     });
 
