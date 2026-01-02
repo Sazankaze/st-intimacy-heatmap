@@ -69,7 +69,7 @@ function parseSTDate(dateString) {
     return isNaN(d.getTime()) ? null : d;
 }
 
-// === 3. 核心数据获取逻辑 (FIXED) ===
+// === 3. 核心数据获取逻辑 (FIXED & ROBUST) ===
 
 async function parseResponseText(res) {
     try {
@@ -94,47 +94,56 @@ async function parseResponseText(res) {
     }
 }
 
-async function fetchChatFileContent(folderNameFromId, fileName) {
-    // 安全检查：如果文件名不存在，直接返回空，防止后面 split 报错
+async function fetchChatFileContent(folderNameFromAvatar, fileName) {
     if (!fileName) return [];
 
     const encodedFileName = encodeURIComponent(fileName);
+    
+    // 准备所有可能的路径尝试列表
+    const pathsToTry = [];
 
-    // --- Attempt 1: Use characterId (avatar folder name) ---
-    // 修复：参考 reference.js，这里不应该对 folderNameFromId 进行 encodeURIComponent 编码
-    // SillyTavern 的静态文件服务可能期望原始字符串，或者已经在其他地方处理了
-    if (folderNameFromId) {
-        // [FIXED] 移除了 const encodedFolder = encodeURIComponent(folderNameFromId);
-        // 直接使用 folderNameFromId 以保持与 reference.js 一致
-        const path1 = `/chats/${folderNameFromId}/${encodedFileName}`;
-        
-        try {
-            const res = await fetch(path1, { method: 'GET', credentials: 'same-origin' });
-            if (res.ok) {
-                return await parseResponseText(res);
-            }
-        } catch (e) {
-            // Check next attempt silently
-        }
+    // 1. 基于头像的文件夹名称 (Encoded) - 标准情况
+    if (folderNameFromAvatar) {
+        pathsToTry.push(`/chats/${encodeURIComponent(folderNameFromAvatar)}/${encodedFileName}`);
+        // 2. 基于头像的文件夹名称 (Raw) - 有些服务器配置不需要编码
+        pathsToTry.push(`/chats/${folderNameFromAvatar}/${encodedFileName}`);
     }
 
-    // --- Attempt 2: Use encoded character name from filename ---
-    // Reference: "Attempt 2 (Fallback): Use encoded character name from filename"
+    // 3. 基于文件名推断的文件夹名称 - 对应 Reference.js 的 fallback 逻辑
+    // 例如文件名为 "黑田葵 - 2026..."，尝试去 "黑田葵" 文件夹找
     try {
-        const charNameFromFill = fileName.split(' - ')[0];
-        if (charNameFromFill && charNameFromFill.length > 0 && charNameFromFill !== fileName) {
-            const encodedFolderB = encodeURIComponent(charNameFromFill);
-            const path2 = `/chats/${encodedFolderB}/${encodedFileName}`;
-
-            const res = await fetch(path2, { method: 'GET', credentials: 'same-origin' });
-            if (res.ok) {
-                return await parseResponseText(res);
+        // 通常格式是 "CharName - Date.jsonl"
+        const splitName = fileName.split(' - ');
+        if (splitName.length > 1) {
+            const charNameFromFile = splitName[0];
+            if (charNameFromFile && charNameFromFile !== folderNameFromAvatar) {
+                // 同样尝试编码和不编码两种情况
+                pathsToTry.push(`/chats/${encodeURIComponent(charNameFromFile)}/${encodedFileName}`);
+                pathsToTry.push(`/chats/${charNameFromFile}/${encodedFileName}`);
             }
         }
-    } catch (e) {
-        // Failed
+    } catch(e) {}
+
+    // 4. 暴力尝试：不使用子文件夹（虽然很少见，但也试一下）
+    // pathsToTry.push(`/chats/${encodedFileName}`);
+
+    // === 开始逐个尝试 ===
+    for (const path of pathsToTry) {
+        try {
+            const res = await fetch(path, { method: 'GET', credentials: 'same-origin' });
+            // 只有状态码为 200 OK 才视为成功
+            if (res.ok) {
+                // 成功！解析并返回
+                return await parseResponseText(res);
+            }
+            // 如果是 404，for 循环会继续尝试下一个 path
+        } catch (e) {
+            // 网络错误等，继续尝试下一个
+        }
     }
 
+    // 所有尝试都失败了
+    // console.warn(`[Intimacy] Failed to fetch ${fileName} after ${pathsToTry.length} attempts.`);
     return [];
 }
 
@@ -146,12 +155,14 @@ async function getCharacterMessages(charIndex, avatarFileName) {
             return [];
         }
 
-        // Logic from reference.js: extract folder name from avatar ID
+        // 从头像文件名中提取基础文件夹名 (移除 .png 等后缀)
+        let folderName = avatarFileName;
         const lastDotIndex = avatarFileName.lastIndexOf('.');
-        const folderName = lastDotIndex > 0 ? avatarFileName.substring(0, lastDotIndex) : avatarFileName;
+        if (lastDotIndex > 0) {
+            folderName = avatarFileName.substring(0, lastDotIndex);
+        }
         
         const allFileMessages = await asyncPool(5, chats, async (chatMeta) => {
-            // 确保 chatMeta 存在且有 file_name
             if (!chatMeta || !chatMeta.file_name) return [];
             return await fetchChatFileContent(folderName, chatMeta.file_name);
         });
