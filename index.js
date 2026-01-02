@@ -1,6 +1,6 @@
 /*
-    SillyTavern Extension: Intimacy Heatmap (Extensions Menu Version)
-    Features: Button located inside the Extensions Dropdown Menu
+    SillyTavern Extension: Intimacy Heatmap (Fixed 404 Version)
+    Fixed: Uses /api/chats/get for both listing and fetching to compatible with new ST API.
 */
 
 (function () {
@@ -12,7 +12,7 @@
         currentMonthIndex: 0
     };
 
-    // 简单的并发控制器
+    // 并发控制器
     async function asyncPool(poolLimit, array, iteratorFn, onProgress) {
         const ret = [];
         const executing = [];
@@ -38,33 +38,18 @@
     }
 
     // === 工具函数 ===
-
     function parseSTDate(dateInput) {
         if (!dateInput) return null;
         if (typeof dateInput === 'number') return new Date(dateInput);
         let dateStr = String(dateInput).trim();
-        
-        if (dateStr.includes('@')) {
-            try {
-                const isoStr = dateStr.replace('@', 'T').replace('h', ':').replace('m', ':').replace('s', '');
-                const d = new Date(isoStr);
-                if (!isNaN(d.getTime())) return d;
-            } catch (e) {}
-        }
-        
+        if (dateStr.includes('@')) { try { const isoStr = dateStr.replace('@', 'T').replace('h', ':').replace('m', ':').replace('s', ''); const d = new Date(isoStr); if (!isNaN(d.getTime())) return d; } catch (e) {} }
         let d = new Date(dateStr);
         if (!isNaN(d.getTime())) return d;
-        
-        if (/am|pm/i.test(dateStr) && !/\s(am|pm)/i.test(dateStr)) {
-            const fixedStr = dateStr.replace(/(\d)(am|pm)/i, '$1 $2');
-            d = new Date(fixedStr);
-            if (!isNaN(d.getTime())) return d;
-        }
+        if (/am|pm/i.test(dateStr) && !/\s(am|pm)/i.test(dateStr)) { const fixedStr = dateStr.replace(/(\d)(am|pm)/i, '$1 $2'); d = new Date(fixedStr); if (!isNaN(d.getTime())) return d; }
         return null;
     }
 
     // === 核心统计逻辑 ===
-
     function calculateStats(messages) {
         if (!messages || !messages.length) return null;
         
@@ -105,7 +90,6 @@
             }
         });
 
-        // 日历数据生成
         const firstDateObj = parseSTDate(sortedMsgs[0].send_date);
         const monthsData = [];
         
@@ -181,22 +165,51 @@
         };
     }
 
-    // === 数据获取逻辑 ===
+    // === 数据获取逻辑 (核心修复) ===
 
     async function fetchAllChatsForCharacter(avatarUrl) {
         try {
-            const chatList = await jQuery.post('/api/chats/list', { avatar_url: avatarUrl });
-            if (!chatList || !Array.isArray(chatList) || chatList.length === 0) return [];
+            // 🛑 修复点 1：把 /api/chats/list 改为 /api/chats/get
+            // ST 的新逻辑：只传 avatar_url 给 get 接口，它会返回文件列表
+            const chatList = await jQuery.post('/api/chats/get', { avatar_url: avatarUrl });
+            
+            if (!chatList || !Array.isArray(chatList) || chatList.length === 0) {
+                // 有时候 ST 返回的是 { "chat": [] } 格式，兼容一下
+                if (chatList && chatList.chat && Array.isArray(chatList.chat)) {
+                     // 如果数据在 chat 字段里
+                     if(chatList.chat.length === 0) return [];
+                     // 如果 chatList.chat 是数组，我们继续
+                } else {
+                    return [];
+                }
+            }
 
-            const results = await asyncPool(5, chatList, (fileName) => {
-                return jQuery.post('/api/chats/get', { avatar_url: avatarUrl, file_name: fileName })
-                    .then(data => Array.isArray(data) ? data : [])
-                    .catch(err => []);
+            // 这里的 chatList 应该是一个文件名数组 ['chat1.jsonl', 'chat2.jsonl']
+            // 或者如果是对象格式，我们需要提取出来
+            const fileList = Array.isArray(chatList) ? chatList : (chatList.chat || []);
+
+            console.log(`[Intimacy] Found ${fileList.length} chat files for ${avatarUrl}`);
+
+            const results = await asyncPool(5, fileList, (fileName) => {
+                // 🛑 修复点 2：这里也用 /api/chats/get，但是带上 file_name 参数来获取内容
+                return jQuery.post('/api/chats/get', { 
+                    avatar_url: avatarUrl, 
+                    file_name: fileName 
+                })
+                .then(data => {
+                    // 兼容：有时候返回的是对象 { ... data ... }，有时候是数组
+                    return Array.isArray(data) ? data : [];
+                })
+                .catch(err => {
+                    console.warn(`Skipping ${fileName}:`, err);
+                    return [];
+                });
             });
 
             return results.flat();
         } catch (error) {
             console.warn(`Failed to fetch chats for ${avatarUrl}`, error);
+            // 这里不 throw 错误，而是返回空数组，防止一个角色失败卡死整个全局统计
             return [];
         }
     }
@@ -415,14 +428,15 @@
             hideLoading();
 
             if (!stats) {
-                toastr.warning("该角色没有有效聊天记录", "提示");
+                // 如果没有拿到数据，可能是刚换了文件名，或者确实没聊天
+                toastr.warning("未找到历史记录，或者读取接口被拒绝", "提示");
                 return;
             }
             renderModal(`${charName} - 情感档案`, stats);
         } catch (e) {
             hideLoading();
             console.error(e);
-            toastr.error("读取失败", "错误");
+            toastr.error("读取失败，请查看控制台", "错误");
         }
     }
 
@@ -462,22 +476,39 @@
         }
     }
 
-    // === 插件加载 (Menu Version) ===
+    // === 插件加载 (双保险：同时尝试注入菜单和悬浮窗) ===
     jQuery(document).ready(function () {
-        // 核心修改：插入到扩展菜单
-        // 使用 list-group-item 样式，使其和菜单里的其他项长得一样
-        const menuHtml = `
-            <div id="intimacy-trigger" class="list-group-item" style="cursor:pointer; display:flex; align-items:center;">
+        console.log("St-Intimacy-Heatmap: Plugin Loaded (404 FIX APPLIED)."); 
+
+        // 1. 尝试添加到扩展菜单
+        const menuBtnHtml = `
+            <div id="intimacy-trigger-menu" class="list-group-item" style="cursor:pointer; display:flex; align-items:center;">
                 <i class="fa-solid fa-heart-pulse" style="color: #e91e63; margin-right:10px; width:20px; text-align:center;"></i>
-                <span>情感档案 / 全局统计</span>
+                <span>情感档案</span>
             </div>
         `;
-
-        // #extensionsMenu 是扩展下拉菜单的容器 ID
-        $('#extensionsMenu').append(menuHtml);
-
-        $(document).on('click', '#intimacy-trigger', handleTrigger);
+        setTimeout(() => {
+            if ($('#extensionsMenu').length) {
+                $('#extensionsMenu').append(menuBtnHtml);
+            }
+        }, 1500);
         
-        console.log(`${extensionName} loaded (Extensions Menu Version).`);
+        // 2. 强制悬浮按钮 (为了让你肯定能找到它)
+        const floatBtnHtml = `
+            <div id="intimacy-trigger-float" 
+                 style="position:fixed; bottom:20px; right:20px; width:50px; height:50px; 
+                        background:#e91e63; border-radius:50%; color:white; 
+                        display:flex; align-items:center; justify-content:center; 
+                        font-size:24px; cursor:pointer; box-shadow:0 4px 10px rgba(0,0,0,0.3); z-index:99999;"
+                 title="点击查看情感档案">
+                <i class="fa-solid fa-heart-pulse"></i>
+            </div>
+        `;
+        $('body').append(floatBtnHtml);
+
+        $(document).on('click', '#intimacy-trigger-menu', handleTrigger);
+        $(document).on('click', '#intimacy-trigger-float', handleTrigger);
+        
+        toastr.success("情感档案插件已加载 (API已修复)", "Success");
     });
 })();
