@@ -87,28 +87,58 @@ async function parseResponseJson(res) {
     return messages;
 }
 
+// 修复版：不对文件夹名进行过度编码，增加详细调试日志
 async function fetchChatFileContent(folderNameFromId, fileName) {
     const encodedFileName = encodeURIComponent(fileName);
-    const encodedFolderA = encodeURIComponent(folderNameFromId);
-    let urlA = `/chats/${encodedFolderA}/${encodedFileName}`;
+    
+    // 【关键修复】不要对文件夹名进行 encodeURIComponent
+    // 浏览器会自动处理路径中的中文，手动编码反而会导致服务器找不到文件夹
+    // 方案 A: 使用 ID 推断的文件夹名 (例如: /chats/黑田葵/...)
+    let urlA = `/chats/${folderNameFromId}/${encodedFileName}`;
     
     try {
         let res = await fetch(urlA, { method: 'GET', credentials: 'same-origin' });
         
         if (res.ok) {
             return await parseResponseJson(res);
+        } else {
+            console.warn(`[Intimacy] Path A failed (${res.status}): ${urlA}`);
         }
 
+        // 方案 B: 尝试从文件名提取 (例如文件名为 "黑田葵 - 2024.jsonl")
         const charNameFromFill = fileName.split(' - ')[0];
         if (charNameFromFill && charNameFromFill !== folderNameFromId) {
-            const encodedFolderB = encodeURIComponent(charNameFromFill);
-            const urlB = `/chats/${encodedFolderB}/${encodedFileName}`;
+            // 同样，这里也不要 encodeURIComponent 文件夹名
+            const urlB = `/chats/${charNameFromFill}/${encodedFileName}`;
             
             res = await fetch(urlB, { method: 'GET', credentials: 'same-origin' });
             if (res.ok) {
                 return await parseResponseJson(res);
+            } else {
+                console.warn(`[Intimacy] Path B failed (${res.status}): ${urlB}`);
             }
         }
+        
+        // 方案 C (兜底): 如果静态文件读不到，尝试使用 SillyTavern 的 API
+        // 这通常能解决所有路径编码问题
+        try {
+            const apiUrl = '/api/chats/get';
+            const apiRes = await fetch(apiUrl, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    ch_name: folderNameFromId, // 或者是 charNameFromFill
+                    file_name: fileName
+                })
+            });
+            if (apiRes.ok) {
+                console.log(`[Intimacy] API Fallback success for ${fileName}`);
+                return await parseResponseJson(apiRes);
+            }
+        } catch(apiErr) {
+            console.warn("[Intimacy] API Fallback failed");
+        }
+
         return [];
     } catch (e) {
         console.error(`[Intimacy] Network error fetching ${fileName}`, e);
