@@ -1,6 +1,6 @@
 /*
-    SillyTavern Extension: Intimacy Heatmap (Bottom Button Version)
-    Features: Button moved to Quick Reply area (like Custom Prompt Kity)
+    SillyTavern Extension: Intimacy Heatmap (Extensions Menu Version)
+    Features: Button located inside the Extensions Dropdown Menu
 */
 
 (function () {
@@ -107,7 +107,6 @@
 
         // 日历数据生成
         const firstDateObj = parseSTDate(sortedMsgs[0].send_date);
-        // const lastDateObj = new Date(); 
         const monthsData = [];
         
         if (firstDateObj) {
@@ -463,32 +462,22 @@
         }
     }
 
-    // === 插件加载 (Quick Reply Version) ===
+    // === 插件加载 (Menu Version) ===
     jQuery(document).ready(function () {
-        // 核心修改：寻找 Quick Reply 容器
-        const container = $('#quick-reply-container');
-
-        // 使用 qr--button 样式，使其看起来像原生按钮
-        // 在 icon 上加了 style="color: #e91e63;" 保持粉色爱心
-        const btnHtml = `
-            <div id="intimacy-trigger" class="qr--button" title="情感档案 / 全局统计" role="button" tabindex="0">
-                <i class="fa-solid fa-heart-pulse" style="color: #e91e63;"></i>
+        // 核心修改：插入到扩展菜单
+        // 使用 list-group-item 样式，使其和菜单里的其他项长得一样
+        const menuHtml = `
+            <div id="intimacy-trigger" class="list-group-item" style="cursor:pointer; display:flex; align-items:center;">
+                <i class="fa-solid fa-heart-pulse" style="color: #e91e63; margin-right:10px; width:20px; text-align:center;"></i>
+                <span>情感档案 / 全局统计</span>
             </div>
         `;
 
-        // 插入按钮
-        if (container.length) {
-            container.append(btnHtml);
-        } else {
-            // 如果因为某种原因找不到 quick-reply-container，回退到 drawer-toggle 旁边（作为保险）
-            console.warn("Intimacy Heatmap: Could not find #quick-reply-container, falling back to top bar.");
-            $('.drawer-toggle').last().after(`
-                <div class="intimacy-top-btn fa-solid fa-heart-pulse" id="intimacy-trigger" title="情感档案"></div>
-            `);
-        }
+        // #extensionsMenu 是扩展下拉菜单的容器 ID
+        $('#extensionsMenu').append(menuHtml);
 
         $(document).on('click', '#intimacy-trigger', handleTrigger);
         
-        console.log(`${extensionName} loaded (Quick Reply Version).`);
+        console.log(`${extensionName} loaded (Extensions Menu Version).`);
     });
 })();
