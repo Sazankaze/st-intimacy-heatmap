@@ -108,7 +108,9 @@ async function fetchChatFileContent(folderNameFromId, fileName) {
     console.log(`Input fileName: "${fileName}"`);
     // === DEBUG LOGS END ===
 
+    const encodedFolder = encodeURIComponent(folderNameFromId);
     const encodedFileName = encodeURIComponent(fileName);
+
     
     // --- 方案 A ---
     let urlA = `/chats/${folderNameFromId}/${encodedFileName}`;
