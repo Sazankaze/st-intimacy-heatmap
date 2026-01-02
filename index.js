@@ -35,7 +35,7 @@ async function asyncPool(poolLimit, array, iteratorFn, onProgress) {
     return Promise.all(ret);
 }
 
-// === 2. 日期解析 (增强兼容性) ===
+// === 2. 日期解析 ===
 const monthMap = {
     Jan: '01', January: '01', Feb: '02', February: '02', Mar: '03', March: '03',
     Apr: '04', April: '04', May: '05', Jun: '06', June: '06',
@@ -47,7 +47,6 @@ function parseSTDate(dateString) {
     if (!dateString) return null;
     if (typeof dateString === 'number') return new Date(dateString);
 
-    // 1. 尝试 SillyTavern 标准格式 "Month Day, Year HH:MMam/pm"
     const parts = dateString.match(/(\w+)\s+(\d+),\s+(\d+)\s+(\d+):(\d+)(am|pm)/i);
     if (parts) {
         const month = monthMap[parts[1]] || '01';
@@ -58,7 +57,6 @@ function parseSTDate(dateString) {
         return new Date(iso);
     }
     
-    // 2. 尝试 ST 的另一种格式 "YYYY-MM-DD @ HHhMMmSSs"
     if (dateString.includes('@')) {
         try {
             const isoStr = dateString.replace('@', 'T').replace('h', ':').replace('m', ':').replace('s', '');
@@ -67,17 +65,14 @@ function parseSTDate(dateString) {
         } catch(e) {}
     }
 
-    // 3. 暴力兜底：直接扔给浏览器解析
     const d = new Date(dateString);
     return isNaN(d.getTime()) ? null : d;
 }
 
-// === 3. 核心数据获取逻辑 (已修复权限问题) ===
+// === 3. 核心数据获取逻辑 (修复参数类型错误) ===
 
-// 辅助函数：解析响应文本为 JSON 数组
 async function parseResponseJson(res) {
     const text = await res.text();
-    // 验证是否误返回了 HTML
     if (text.trim().startsWith("<!DOCTYPE") || text.trim().startsWith("<html")) {
         return [];
     }
@@ -92,23 +87,18 @@ async function parseResponseJson(res) {
     return messages;
 }
 
-// 获取单个文件的内容
 async function fetchChatFileContent(folderNameFromId, fileName) {
     const encodedFileName = encodeURIComponent(fileName);
-    
-    // 方案 A: 优先使用 Avatar ID 推断的文件夹名
     const encodedFolderA = encodeURIComponent(folderNameFromId);
     let urlA = `/chats/${encodedFolderA}/${encodedFileName}`;
     
     try {
-        // 关键修复：添加 credentials: 'same-origin'
         let res = await fetch(urlA, { method: 'GET', credentials: 'same-origin' });
         
         if (res.ok) {
             return await parseResponseJson(res);
         }
 
-        // 方案 B: 尝试从文件名中提取角色名作为文件夹名
         const charNameFromFill = fileName.split(' - ')[0];
         if (charNameFromFill && charNameFromFill !== folderNameFromId) {
             const encodedFolderB = encodeURIComponent(charNameFromFill);
@@ -119,8 +109,6 @@ async function fetchChatFileContent(folderNameFromId, fileName) {
                 return await parseResponseJson(res);
             }
         }
-        
-        console.warn(`[Intimacy] Failed to fetch: ${fileName}`);
         return [];
     } catch (e) {
         console.error(`[Intimacy] Network error fetching ${fileName}`, e);
@@ -128,32 +116,33 @@ async function fetchChatFileContent(folderNameFromId, fileName) {
     }
 }
 
-// 获取单个角色的所有聊天记录
-async function getCharacterMessages(avatarId) {
+// 【关键修复】现在接收 (角色索引, 头像文件名)
+async function getCharacterMessages(charIndex, avatarFileName) {
     try {
-        const chats = await getPastCharacterChats(avatarId);
+        // 1. 获取文件列表：必须传 Index (数字)，不能传文件名！
+        const chats = await getPastCharacterChats(charIndex);
         
         if (!chats || !Array.isArray(chats) || chats.length === 0) {
-            console.warn(`[Intimacy] No chat history found in index for: ${avatarId}`);
+            console.warn(`[Intimacy] No chat history found for index: ${charIndex} (${avatarFileName})`);
             return [];
         }
 
-        console.log(`[Intimacy] Found ${chats.length} chat files for ${avatarId}. Downloading content...`);
+        console.log(`[Intimacy] Found ${chats.length} chat files for ${avatarFileName}.`);
 
-        // 计算文件夹名 (去除扩展名) - 增强健壮性
-        const lastDotIndex = avatarId.lastIndexOf('.');
-        const folderName = lastDotIndex > 0 ? avatarId.substring(0, lastDotIndex) : avatarId;
+        // 2. 构造文件夹名：需要用文件名 (字符串)
+        const lastDotIndex = avatarFileName.lastIndexOf('.');
+        const folderName = lastDotIndex > 0 ? avatarFileName.substring(0, lastDotIndex) : avatarFileName;
 
-        // 并发读取
+        // 3. 下载内容
         const allFileMessages = await asyncPool(5, chats, async (chatMeta) => {
             return await fetchChatFileContent(folderName, chatMeta.file_name);
         });
 
         const flattened = allFileMessages.flat();
-        console.log(`[Intimacy] Successfully loaded ${flattened.length} messages for ${avatarId}`);
+        console.log(`[Intimacy] Loaded ${flattened.length} messages for ${avatarFileName}`);
         return flattened;
     } catch (e) {
-        console.error(`[Intimacy] Error processing character ${avatarId}:`, e);
+        console.error(`[Intimacy] Error processing character ${avatarFileName}:`, e);
         return [];
     }
 }
@@ -167,12 +156,17 @@ async function getGlobalMessages(onProgress) {
     }
 
     const characters = context.characters;
-    const validChars = characters.filter(c => c && c.avatar && typeof c.avatar === 'string');
     
-    console.log(`[Intimacy] Starting global scan for ${validChars.length} characters.`);
+    // 【关键修复】保留原始索引 (Index)，因为 getPastCharacterChats 需要它
+    const validTasks = characters
+        .map((char, index) => ({ char, index }))
+        .filter(task => task.char && task.char.avatar && typeof task.char.avatar === 'string');
+    
+    console.log(`[Intimacy] Starting global scan for ${validTasks.length} characters.`);
 
-    const results = await asyncPool(3, validChars, async (char) => {
-        return await getCharacterMessages(char.avatar);
+    const results = await asyncPool(3, validTasks, async (task) => {
+        // 传入 Index 和 文件名
+        return await getCharacterMessages(task.index, task.char.avatar);
     }, onProgress);
 
     return results.flat();
@@ -338,7 +332,6 @@ function renderModalUI(title) {
     $('body').append(html);
     $('#st-intimacy-overlay').css('display', 'flex');
 
-    // 绑定事件
     $('#st-close-overlay').click(() => $('#st-intimacy-overlay').remove());
     $('#st-intimacy-overlay').click((e) => {
         if (e.target.id === 'st-intimacy-overlay') $('#st-intimacy-overlay').remove();
@@ -455,11 +448,10 @@ function moveTooltip(e) {
 // === 6. 主入口 ===
 async function openIntimacyHeatmap() {
     const context = getContext();
-    const charId = context.characterId;
+    const charId = context.characterId; // 这里获取的是 Number 类型的索引 (0, 1, 2...)
     
     if (charId === undefined || charId === null) {
         if(confirm("当前未加载角色。是否进行全员【全局统计】？")) {
-            // 模拟一个空的初始状态，然后自动触发全局加载
             intimacyState.stats = { firstDate:'-', daysSince:0, activeDays:0, totalMessages:0, totalChars:0, totalRerolls:0 };
             renderModalUI("全局数据加载中...");
             $('#st-btn-global').click();
@@ -468,12 +460,12 @@ async function openIntimacyHeatmap() {
     }
 
     const charName = context.characters[charId].name;
-    const avatar = context.characters[charId].avatar;
+    const avatar = context.characters[charId].avatar; // 这里获取的是文件名 "xxx.png"
     
     toastr.info(`正在读取 ${charName} 的历史记录...`);
     
-    const msgs = await getCharacterMessages(avatar);
-    console.log(`[Intimacy] Messages loaded: ${msgs.length}`);
+    // 【关键修复】同时传入 索引(查记录) 和 文件名(拼路径)
+    const msgs = await getCharacterMessages(charId, avatar);
     
     const stats = calculateStats(msgs);
     
@@ -495,13 +487,12 @@ jQuery(async () => {
             <span style="margin-right:10px; width:20px; text-align:center;">
                 <i class="fa-solid fa-heart-pulse" style="color: #e91e63;"></i>
             </span>
-            <span>情感档案 / 全局统计</span>
+            <span>情感档案</span>
         </div>
     `;
 
     const intv = setInterval(() => {
         if ($('#extensionsMenu').length > 0) {
-            // 防止重复添加
             if ($('#st-intimacy-trigger').length === 0) {
                 $('#extensionsMenu').append(menuBtn);
                 $('#st-intimacy-trigger').on('click', openIntimacyHeatmap);
@@ -510,5 +501,5 @@ jQuery(async () => {
         }
     }, 500);
 
-    console.log(`${extensionName} loaded (Fixed Version).`);
+    console.log(`${extensionName} loaded (Final Fix).`);
 });
