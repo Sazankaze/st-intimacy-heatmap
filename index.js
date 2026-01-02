@@ -69,7 +69,7 @@ function parseSTDate(dateString) {
     return isNaN(d.getTime()) ? null : d;
 }
 
-// === 3. 核心数据获取逻辑 (完全修复版) ===
+// === 3. 核心数据获取逻辑 (DEBUG 版) ===
 
 async function parseResponseJson(res) {
     const text = await res.text();
@@ -86,7 +86,6 @@ async function parseResponseJson(res) {
     return messages;
 }
 
-// 解析 jQuery 返回的数据 (通常是 JSONL 字符串)
 function parseTextData(text) {
     if (!text || typeof text !== 'string') return [];
     if (text.trim().startsWith("<!DOCTYPE")) return [];
@@ -103,63 +102,90 @@ function parseTextData(text) {
 }
 
 async function fetchChatFileContent(folderNameFromId, fileName) {
+    // === DEBUG LOGS START ===
+    console.groupCollapsed(`[DEBUG] Fetching: ${fileName}`);
+    console.log(`Input folderName: "${folderNameFromId}"`);
+    console.log(`Input fileName: "${fileName}"`);
+    // === DEBUG LOGS END ===
+
     const encodedFileName = encodeURIComponent(fileName);
     
-    // 方案 A: 静态路径 (Reference.js 逻辑 - 不编码文件夹名)
-    // 针对: /chats/黑田葵/file.jsonl
+    // --- 方案 A ---
     let urlA = `/chats/${folderNameFromId}/${encodedFileName}`;
-    
+    console.log(`[DEBUG] Trying Path A: ${urlA}`); // 打印拼接好的 URL
+
     try {
         let res = await fetch(urlA, { method: 'GET', credentials: 'same-origin' });
-        if (res.ok) return await parseResponseJson(res);
-        // console.warn(`[Intimacy] Path A failed (${res.status}): ${urlA}`);
+        if (res.ok) {
+            console.log(`[DEBUG] Path A Success!`);
+            console.groupEnd();
+            return await parseResponseJson(res);
+        }
+        console.warn(`[DEBUG] Path A Failed (${res.status})`);
 
-        // 方案 B: 静态路径 (Reference.js 逻辑 - 编码文件夹名)
-        // 针对: /chats/%E9%BB%91.../file.jsonl
+        // --- 方案 B ---
         const charNameFromFill = fileName.split(' - ')[0];
-        // 只有当拆分出来的名字看起来合理时才尝试，避免像 "2026-1-1..." 这种文件名导致错误的文件夹路径
+        // 只有当拆分出来的名字看起来合理时才尝试
         if (charNameFromFill && charNameFromFill.length > 0 && charNameFromFill !== fileName) {
             const encodedFolderB = encodeURIComponent(charNameFromFill);
             const urlB = `/chats/${encodedFolderB}/${encodedFileName}`;
-            
+            console.log(`[DEBUG] Trying Path B: ${urlB}`); // 打印 URL B
+
             res = await fetch(urlB, { method: 'GET', credentials: 'same-origin' });
-            if (res.ok) return await parseResponseJson(res);
-            // console.warn(`[Intimacy] Path B failed (${res.status}): ${urlB}`);
+            if (res.ok) {
+                console.log(`[DEBUG] Path B Success!`);
+                console.groupEnd();
+                return await parseResponseJson(res);
+            }
+            console.warn(`[DEBUG] Path B Failed (${res.status})`);
+        } else {
+            console.log(`[DEBUG] Skipping Path B (Filename pattern match failed: "${charNameFromFill}")`);
         }
 
-        // 方案 C: API 兜底 (使用 jQuery 解决 403 Forbidden 问题) 
-        // 这是一个 Promise 包装器，因为 $.post 是基于回调的
+        // --- 方案 C (API) ---
+        console.log(`[DEBUG] Trying API Fallback (jQuery POST)...`);
+        console.log(`[DEBUG] API Payload: ch_name="${folderNameFromId}", file_name="${fileName}"`);
+
         return new Promise((resolve) => {
             $.post('/api/chats/get', { 
                 ch_name: folderNameFromId, 
                 file_name: fileName 
             })
             .done((data) => {
-                // API 成功，数据通常是纯文本 (JSONL)
-                // console.log(`[Intimacy] API Fallback success for ${fileName}`);
+                console.log(`[DEBUG] API Success! Data length: ${data.length}`);
+                console.groupEnd();
                 resolve(parseTextData(data));
             })
-            .fail((xhr) => {
-                // 如果第一次 API 失败，尝试用从文件名解析出的名字再试一次
+            .fail((xhr, status, error) => {
+                console.error(`[DEBUG] API Failed. Status: ${xhr.status}, Error: ${error}`);
+                
+                // API 第一次失败，尝试用解析出的名字再试一次
                 if (charNameFromFill && charNameFromFill !== folderNameFromId) {
+                    console.log(`[DEBUG] Retrying API with ch_name="${charNameFromFill}"...`);
                     $.post('/api/chats/get', { 
                         ch_name: charNameFromFill, 
                         file_name: fileName 
                     })
-                    .done((data) => resolve(parseTextData(data)))
+                    .done((data) => {
+                         console.log(`[DEBUG] API Retry Success!`);
+                         console.groupEnd();
+                         resolve(parseTextData(data));
+                    })
                     .fail(() => {
-                        console.error(`[Intimacy] All methods failed for ${fileName}`);
+                        console.error(`[DEBUG] API Retry Failed.`);
+                        console.groupEnd();
                         resolve([]);
                     });
                 } else {
-                    console.error(`[Intimacy] API failed for ${fileName}: ${xhr.status}`);
+                    console.groupEnd();
                     resolve([]);
                 }
             });
         });
 
     } catch (e) {
-        console.error(`[Intimacy] Critical error fetching ${fileName}`, e);
+        console.error(`[DEBUG] Critical error fetching ${fileName}`, e);
+        console.groupEnd();
         return [];
     }
 }
@@ -168,18 +194,22 @@ async function getCharacterMessages(charIndex, avatarFileName) {
     try {
         const chats = await getPastCharacterChats(charIndex);
         
+        // === DEBUG: 打印原始列表 ===
+        console.log(`[DEBUG] Raw chat list for index ${charIndex} (${avatarFileName}):`, chats);
+        
         if (!chats || !Array.isArray(chats) || chats.length === 0) {
             console.warn(`[Intimacy] No chat history found for index: ${charIndex}`);
             return [];
         }
 
-        console.log(`[Intimacy] Found ${chats.length} chat files for ${avatarFileName}.`);
-
         // 提取文件夹名
         const lastDotIndex = avatarFileName.lastIndexOf('.');
         const folderName = lastDotIndex > 0 ? avatarFileName.substring(0, lastDotIndex) : avatarFileName;
+        
+        console.log(`[DEBUG] Derived folderName for fetch: "${folderName}"`);
 
         const allFileMessages = await asyncPool(5, chats, async (chatMeta) => {
+            // 这里我们传入从 ID 推断出的文件夹名，和列表里给出的文件名
             return await fetchChatFileContent(folderName, chatMeta.file_name);
         });
 
@@ -528,7 +558,7 @@ jQuery(async () => {
             <span style="margin-right:10px; width:20px; text-align:center;">
                 <i class="fa-solid fa-heart-pulse" style="color: #e91e63;"></i>
             </span>
-            <span>情感档案</span>
+            <span>情感档案 / 全局统计</span>
         </div>
     `;
 
@@ -542,5 +572,5 @@ jQuery(async () => {
         }
     }, 500);
 
-    console.log(`${extensionName} loaded (jQuery API Fix).`);
+    console.log(`${extensionName} loaded (Debug Mode).`);
 });
