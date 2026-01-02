@@ -75,62 +75,90 @@ function parseSTDate(dateString) {
     return isNaN(d.getTime()) ? null : d;
 }
 
-// === 3. 核心数据获取逻辑 (Reference.js 思路) ===
+// === 3. 核心数据获取逻辑 (已修复) ===
 
 // 获取单个文件的内容
-async function fetchChatFileContent(folderName, fileName) {
-    // 确保文件名被编码 (处理空格和特殊字符)
+async function fetchChatFileContent(folderNameFromId, fileName) {
     const encodedFileName = encodeURIComponent(fileName);
-    const encodedFolder = encodeURIComponent(folderName);
     
-    // 路径方案 A: /chats/ID/Filename (例如: /chats/Seraphina/2023-01-01.jsonl)
-    let url = `/chats/${encodedFolder}/${encodedFileName}`;
+    // 方案 A: 优先使用传入的文件夹名 (基于 Avatar ID 推断)
+    // 这里的 folderNameFromId 应该是类似 "Seraphina" (不带 .png)
+    const encodedFolderA = encodeURIComponent(folderNameFromId);
+    let urlA = `/chats/${encodedFolderA}/${encodedFileName}`;
     
     try {
-        let res = await fetch(url, { method: 'GET' });
+        // 【关键修复 1】添加 credentials: 'same-origin'
+        let res = await fetch(urlA, { method: 'GET', credentials: 'same-origin' });
         
-        // 如果方案 A 失败 (404)，尝试方案 B
-        if (!res.ok) {
-            // console.warn(`[Intimacy] Path A failed (${res.status}): ${url}`);
-            
-            // 路径方案 B: 尝试从文件名中提取角色名 (Reference.js 的 fallback)
-            // 假设文件名格式是 "CharacterName - Date.jsonl"
-            const charNameFromFill = fileName.split(' - ')[0];
-            if (charNameFromFill && charNameFromFill !== folderName) {
-                const urlB = `/chats/${encodeURIComponent(charNameFromFill)}/${encodedFileName}`;
-                res = await fetch(urlB, { method: 'GET' });
-                // if (!res.ok) console.warn(`[Intimacy] Path B failed (${res.status}): ${urlB}`);
-            }
-        }
-
+        // 如果方案 A 成功，直接处理
         if (res.ok) {
-            const text = await res.text();
-            // 简单验证一下是不是 HTML (有时候 404 页面会返回 HTML)
-            if (text.trim().startsWith("<!DOCTYPE") || text.trim().startsWith("<html")) {
-                console.error(`[Intimacy] Error: Server returned HTML instead of JSONL for ${url}. Path is likely wrong.`);
-                return [];
-            }
-
-            const lines = text.trim().split('\n');
-            const messages = [];
-            lines.forEach(line => {
-                try {
-                    const json = JSON.parse(line);
-                    // 只要有 send_date 就认为是有效消息
-                    if (json.send_date) messages.push(json);
-                } catch(e) {
-                    // 忽略解析错误的行
-                }
-            });
-            return messages;
-        } else {
-            // 如果最终还是失败，打印错误以便调试
-            console.error(`[Intimacy] Failed to fetch chat file: ${fileName}. Status: ${res.status}`);
+            return await parseResponseJson(res, urlA);
         }
+
+        // 方案 B: 如果 A 失败 (404)，尝试从聊天文件名中提取角色名作为文件夹
+        // Reference.js 的逻辑：很多时候文件夹名是角色名，而不是 Avatar 文件名
+        // 文件名格式通常是: "Character Name - 2023-01-01 @ 12h00m00s.jsonl"
+        const charNameFromFill = fileName.split(' - ')[0];
+        
+        if (charNameFromFill && charNameFromFill !== folderNameFromId) {
+            const encodedFolderB = encodeURIComponent(charNameFromFill);
+            const urlB = `/chats/${encodedFolderB}/${encodedFileName}`;
+            
+            // console.log(`[Intimacy] Path A failed, trying Path B: ${urlB}`);
+            res = await fetch(urlB, { method: 'GET', credentials: 'same-origin' });
+            
+            if (res.ok) {
+                return await parseResponseJson(res, urlB);
+            }
+        }
+        
+        console.warn(`[Intimacy] Failed to fetch chat file: ${fileName} (Tried: ${folderNameFromId} & ${charNameFromFill})`);
+        return [];
+
     } catch (e) {
-        console.error(`[Intimacy] Network error fetching ${url}`, e);
+        console.error(`[Intimacy] Network error fetching ${fileName}`, e);
+        return [];
     }
-    return [];
+}
+
+// 辅助函数：解析响应文本为 JSON 数组
+async function parseResponseJson(res, url) {
+    const text = await res.text();
+    // 验证是否误返回了 HTML (例如 404 页面)
+    if (text.trim().startsWith("<!DOCTYPE") || text.trim().startsWith("<html")) {
+        // console.error(`[Intimacy] Error: Server returned HTML instead of JSONL for ${url}`);
+        return [];
+    }
+
+    const lines = text.trim().split('\n');
+    const messages = [];
+    lines.forEach(line => {
+        try {
+            const json = JSON.parse(line);
+            if (json.send_date) messages.push(json);
+        } catch(e) { }
+    });
+    return messages;
+}
+
+// 辅助函数：解析响应文本为 JSON 数组
+async function parseResponseJson(res, url) {
+    const text = await res.text();
+    // 验证是否误返回了 HTML (例如 404 页面)
+    if (text.trim().startsWith("<!DOCTYPE") || text.trim().startsWith("<html")) {
+        // console.error(`[Intimacy] Error: Server returned HTML instead of JSONL for ${url}`);
+        return [];
+    }
+
+    const lines = text.trim().split('\n');
+    const messages = [];
+    lines.forEach(line => {
+        try {
+            const json = JSON.parse(line);
+            if (json.send_date) messages.push(json);
+        } catch(e) { }
+    });
+    return messages;
 }
 
 // 获取单个角色的所有聊天记录
@@ -148,7 +176,8 @@ async function getCharacterMessages(avatarId) {
 
         // 2. 计算文件夹名 (去除扩展名，例如 Seraphina.png -> Seraphina)
         // 注意：这里假设文件夹名等于 ID。如果用户手动改过文件夹名，这里会挂。
-        const folderName = avatarId.replace(/\.[^/.]+$/, "");
+        const lastDotIndex = avatarId.lastIndexOf('.');
+        const folderName = lastDotIndex > 0 ? avatarId.substring(0, lastDotIndex) : avatarId;
 
         // 3. 并发读取
         const allFileMessages = await asyncPool(5, chats, async (chatMeta) => {
