@@ -3,215 +3,171 @@ import { getPastCharacterChats } from '../../../../script.js';
 
 const extensionName = "st-intimacy-heatmap";
 
-// === 1. 日期解析 (保持原样) ===
-const monthMap = {
-    Jan: '01', January: '01', Feb: '02', February: '02', Mar: '03', March: '03',
-    Apr: '04', April: '04', May: '05', Jun: '06', June: '06',
-    Jul: '07', July: '07', Aug: '08', August: '08', Sep: '09', September: '09',
-    Oct: '10', October: '10', Nov: '11', November: '11', Dec: '12', December: '12'
-};
-
-function parseSillyTavernDate(dateString) {
-    if (!dateString) return null;
-    const parts = dateString.match(/(\w+)\s+(\d+),\s+(\d+)\s+(\d+):(\d+)(am|pm)/i);
-    if (parts) {
-        const monthNumber = monthMap[parts[1]];
-        if (!monthNumber) return null;
-        let hour = parseInt(parts[4], 10);
-        if (parts[6].toLowerCase() === 'pm' && hour !== 12) hour += 12;
-        else if (parts[6].toLowerCase() === 'am' && hour === 12) hour = 0;
-        const isoLikeString = `${parts[3]}-${monthNumber}-${parts[2].padStart(2, '0')}T${String(hour).padStart(2, '0')}:${parts[5]}:00`;
-        return new Date(isoLikeString);
-    }
-    const d = new Date(dateString);
-    return isNaN(d.getTime()) ? null : d;
-}
-
-// === 2. 智能路径获取器 (核心修复) ===
-async function fetchChatContentSmart(fileName, charId) {
-    const context = getContext();
-    let folderCandidates = [];
-
-    // --- 线索 1: 从角色对象里查头像文件名 (最靠谱) ---
-    // 如果 charId 是 148，我们就去 characters[148] 里找 avatar
-    try {
-        if (context.characters && context.characters[charId]) {
-            const charObj = context.characters[charId];
-            if (charObj.avatar) {
-                // 如果头像是 "黑田葵.png"，文件夹通常是 "黑田葵"
-                const avatarName = charObj.avatar.replace(/\.[^/.]+$/, ""); // 去掉后缀
-                folderCandidates.push(avatarName);
-            }
-            if (charObj.name) {
-                // 也尝试直接用角色名 "黑田葵"
-                folderCandidates.push(charObj.name);
-            }
-        }
-    } catch (e) { console.warn("查角色对象失败", e); }
-
-    // --- 线索 2: 从聊天文件名里反推 (Reference.js 的备用招数) ---
-    // 文件名通常是 "黑田葵 - 2026-01-01.jsonl"
-    try {
-        const splitName = fileName.split(' - ');
-        if (splitName.length > 1) {
-            folderCandidates.push(splitName[0]);
-        }
-    } catch (e) {}
-
-    // --- 线索 3: 盲猜 ID (Reference.js 的第一招，虽然经常 404，但也加上) ---
-    if (charId) {
-        folderCandidates.push(String(charId));
-    }
-
-    // --- 去重 ---
-    folderCandidates = [...new Set(folderCandidates)];
-    
-    // 构造所有可能的 URL，包括编码和未编码的组合
-    const encodedFileName = encodeURIComponent(fileName);
-    const urlsToTry = [];
-
-    folderCandidates.forEach(folder => {
-        if (!folder) return;
-        // 尝试编码的文件夹名 (标准)
-        urlsToTry.push(`/chats/${encodeURIComponent(folder)}/${encodedFileName}`);
-        // 尝试不编码的文件夹名 (某些系统/旧版本)
-        urlsToTry.push(`/chats/${folder}/${encodedFileName}`);
-    });
-
-    // --- 逐个尝试 ---
-    for (const url of urlsToTry) {
-        try {
-            const res = await fetch(url, { method: 'GET', credentials: 'same-origin' });
-            if (res.ok) {
-                // 成功了！解析并返回
-                const text = await res.text();
-                return text.trim().split('\n').map(line => {
-                    try { return JSON.parse(line); } catch(e) { return null; }
-                }).filter(m => m);
-            }
-        } catch (e) {
-            // 这个 URL 不对，继续试下一个，不要报错
-        }
-    }
-
-    // 如果所有都失败了，返回空
-    return [];
-}
-
-// === 3. 读取逻辑 ===
-async function getAllMessages(charId) {
-    const chats = await getPastCharacterChats(charId);
-    if (!chats || chats.length === 0) return [];
-
-    let allMessages = [];
-    
-    // 倒序读取，通常最新的在最后
-    let count = 0;
-    for (const chat of chats) {
-        count++;
-        $('#st-test-status').text(`正在分析文件 (${count}/${chats.length})...`);
-        
-        // 这里的关键是把 charId 传进去，让 fetchChatContentSmart 去查真正的文件夹名
-        const msgs = await fetchChatContentSmart(chat.file_name, charId);
-        
-        if (msgs.length > 0) {
-            allMessages = allMessages.concat(msgs);
-        } else {
-            console.warn(`无法读取文件: ${chat.file_name} (尝试了所有可能的路径)`);
-        }
-    }
-    
-    return allMessages;
-}
-
-// === 4. UI ===
-async function runTest() {
+// === 诊断专用函数 ===
+async function runDiagnostic() {
     const context = getContext();
     const charId = context.characterId;
     
-    if (charId === undefined || charId === null) {
-        alert("请先选择一个角色！");
-        return;
-    }
+    // 准备诊断报告的 HTML
+    let reportHtml = `<div style="text-align:left; font-family:monospace; font-size:12px; line-height:1.4;">`;
+    
+    // 1. 检查环境基本信息
+    reportHtml += `<div><strong>--- 1. 环境基础信息 ---</strong></div>`;
+    reportHtml += `<div>CharID (原始值): <span style="color:#facc15">${JSON.stringify(charId)}</span></div>`;
+    reportHtml += `<div>CharID (类型): ${typeof charId}</div>`;
 
-    // 弹窗 UI
-    if ($('#st-test-modal').length === 0) {
-        $('body').append(`
-            <div id="st-test-modal" style="position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);
-            background:#1f2937;padding:25px;border:1px solid #4b5563;z-index:9999;border-radius:12px;
-            box-shadow:0 10px 25px rgba(0,0,0,0.6);min-width:320px;text-align:center;color:#eee;font-family:sans-serif;">
-                <h3 style="margin-top:0; color:#e91e63;"><i class="fa-solid fa-heart-pulse"></i> 情感档案测试</h3>
-                <div id="st-test-status" style="margin:15px 0;color:#aaa;font-size:0.9em;">准备读取数据...</div>
-                <div id="st-test-result" style="background:#111827; padding:15px; border-radius:8px; margin-bottom:15px; text-align:left; font-family:monospace; font-size:0.85em; min-height:80px;">
-                    等待结果...
-                </div>
-                <button id="st-test-close" class="menu_button" style="width:100%">关闭</button>
-            </div>
-        `);
-        $('#st-test-close').click(() => $('#st-test-modal').remove());
-    } else {
-        $('#st-test-status').text("准备读取数据...");
-        $('#st-test-result').text("等待结果...");
-    }
+    let charObj = null;
+    let avatarFile = "未找到";
+    let charName = "未找到";
 
+    // 尝试获取角色对象
     try {
-        const msgs = await getAllMessages(charId);
-        
-        // 统计
-        const validMsgs = msgs.filter(m => m.send_date);
-        validMsgs.sort((a,b) => parseSillyTavernDate(a.send_date) - parseSillyTavernDate(b.send_date));
-
-        const firstMsg = validMsgs.length > 0 ? validMsgs[0] : null;
-        const lastMsg = validMsgs.length > 0 ? validMsgs[validMsgs.length-1] : null;
-
-        const firstDateStr = firstMsg ? firstMsg.send_date : "未知";
-        const lastDateStr = lastMsg ? lastMsg.send_date : "未知";
-        
-        // 计算天数
-        let days = 0;
-        if (firstMsg && lastMsg) {
-            const d1 = parseSillyTavernDate(firstMsg.send_date);
-            const d2 = parseSillyTavernDate(lastMsg.send_date);
-            if (d1 && d2) {
-                days = Math.floor((d2 - d1) / (1000 * 60 * 60 * 24)) + 1;
+        if (context.characters) {
+            // 情况A: characters 是数组
+            if (Array.isArray(context.characters)) {
+                reportHtml += `<div>Characters类型: Array (长度: ${context.characters.length})</div>`;
+                charObj = context.characters[charId];
+            } 
+            // 情况B: characters 是对象 (某些旧版本)
+            else {
+                reportHtml += `<div>Characters类型: Object</div>`;
+                charObj = context.characters[charId];
             }
         }
 
-        $('#st-test-status').html(`<span style="color:#4caf50">✅ 读取成功!</span>`);
-        $('#st-test-result').html(`
-            <div style="margin-bottom:5px;">📂 消息总数: <span style="color:#fff;font-weight:bold;">${msgs.length}</span></div>
-            <div style="margin-bottom:5px;">📅 跨越天数: <span style="color:#fff;font-weight:bold;">${days} 天</span></div>
-            <hr style="border-color:#374151; margin:8px 0;">
-            <div>⏪ 初次见面: <br><span style="color:#818cf8">${firstDateStr}</span></div>
-            <div style="margin-top:5px;">⏩ 最近对话: <br><span style="color:#818cf8">${lastDateStr}</span></div>
-        `);
-
+        if (charObj) {
+            avatarFile = charObj.avatar;
+            charName = charObj.name;
+            reportHtml += `<div><span style="color:#4ade80">✔ 成功获取角色对象</span></div>`;
+            reportHtml += `<div>Display Name: ${charName}</div>`;
+            reportHtml += `<div>Avatar File: <span style="color:#f472b6">${avatarFile}</span></div>`;
+        } else {
+            reportHtml += `<div><span style="color:#ef4444">❌ 无法通过 ID ${charId} 找到角色对象</span></div>`;
+        }
     } catch (e) {
-        $('#st-test-status').html(`<span style="color:#ef4444">❌ 读取出错</span>`);
-        $('#st-test-result').text(e.message);
-        console.error(e);
+        reportHtml += `<div>❌ 读取角色信息报错: ${e.message}</div>`;
     }
+
+    reportHtml += `<br><div><strong>--- 2. 聊天文件与路径测试 ---</strong></div>`;
+
+    try {
+        const chats = await getPastCharacterChats(charId);
+        if (chats && chats.length > 0) {
+            const targetFile = chats[chats.length - 1]; // 取最新的一个文件测试
+            const fileName = targetFile.file_name;
+            reportHtml += `<div>目标文件名: ${fileName}</div>`;
+            
+            // 构建我们需要测试的“嫌疑路径”
+            const candidates = [];
+
+            // 嫌疑人A: 基于 Avatar 文件名 (去后缀)
+            if (avatarFile && typeof avatarFile === 'string') {
+                const folder = avatarFile.replace(/\.[^/.]+$/, "");
+                candidates.push({ type: 'AvatarFolder', folder: folder });
+            }
+
+            // 嫌疑人B: 基于 Avatar 文件名 (直接用，有些版本就是这么怪)
+            if (avatarFile) {
+                candidates.push({ type: 'AvatarRaw', folder: avatarFile });
+            }
+
+            // 嫌疑人C: 基于文件名拆分
+            const splitName = fileName.split(' - ')[0];
+            if (splitName) {
+                candidates.push({ type: 'SplitName', folder: splitName });
+            }
+
+            // 嫌疑人D: 仅仅是 ID
+            candidates.push({ type: 'ID', folder: String(charId) });
+
+            reportHtml += `<div>正在尝试 ${candidates.length} 种路径组合...</div><br>`;
+
+            let success = false;
+
+            // 开始逐个“撞库”
+            for (const cand of candidates) {
+                const encodedFile = encodeURIComponent(fileName);
+                
+                // 组合1: 编码的文件夹
+                const path1 = `/chats/${encodeURIComponent(cand.folder)}/${encodedFile}`;
+                // 组合2: 不编码的文件夹
+                const path2 = `/chats/${cand.folder}/${encodedFile}`;
+                
+                // 测试 Path 1
+                const res1 = await fetch(path1, { method: 'GET' });
+                const color1 = res1.ok ? '#4ade80' : '#ef4444';
+                reportHtml += `<div>[${cand.type}] 尝试: ${path1} <br> -> <span style="color:${color1}">${res1.status} ${res1.statusText}</span></div>`;
+
+                if (res1.ok) {
+                    success = true;
+                    reportHtml += `<div><strong style="color:#4ade80">✨ 找到正确路径! 就是它!</strong></div>`;
+                    break;
+                }
+
+                // 测试 Path 2 (如果和1不一样)
+                if (path1 !== path2) {
+                    const res2 = await fetch(path2, { method: 'GET' });
+                    const color2 = res2.ok ? '#4ade80' : '#ef4444';
+                    reportHtml += `<div>[${cand.type}-Raw] 尝试: ${path2} <br> -> <span style="color:${color2}">${res2.status} ${res2.statusText}</span></div>`;
+                    if (res2.ok) {
+                        success = true;
+                        reportHtml += `<div><strong style="color:#4ade80">✨ 找到正确路径 (无编码)! 就是它!</strong></div>`;
+                        break;
+                    }
+                }
+            }
+
+            if (!success) {
+                reportHtml += `<br><div style="color:#ef4444; font-weight:bold;">💀 所有常规路径均失败。Reference.js 肯定用了什么黑魔法。</div>`;
+            }
+
+        } else {
+            reportHtml += `<div>❌ 未找到该角色的聊天记录列表</div>`;
+        }
+    } catch (e) {
+        reportHtml += `<div>❌ 聊天记录读取流程报错: ${e.message}</div>`;
+    }
+
+    reportHtml += `</div>`;
+
+    // 渲染弹窗
+    if ($('#st-diag-modal').length > 0) $('#st-diag-modal').remove();
+    $('body').append(`
+        <div id="st-diag-modal" style="position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);
+        background:#0f172a;padding:20px;border:2px solid #ef4444;z-index:99999;border-radius:10px;
+        box-shadow:0 0 50px rgba(0,0,0,0.9);width:600px;max-height:80vh;overflow-y:auto;color:#cbd5e1;">
+            <h3 style="margin-top:0;color:#ef4444;">🕵️‍♂️ 路径侦探诊断报告</h3>
+            <div style="background:#1e293b; padding:10px; border-radius:5px; margin-bottom:15px;">
+                ${reportHtml}
+            </div>
+            <div style="font-size:12px; color:#94a3b8; margin-bottom:10px;">
+                请截图这个窗口的内容，或复制上面的信息发给我。
+            </div>
+            <button id="st-diag-close" class="menu_button" style="width:100%">关闭</button>
+        </div>
+    `);
+    $('#st-diag-close').click(() => $('#st-diag-modal').remove());
 }
 
 jQuery(async () => {
     const menuBtn = `
-        <div id="st-test-trigger" class="list-group-item" style="cursor:pointer; display:flex; align-items:center;">
+        <div id="st-diag-trigger" class="list-group-item" style="cursor:pointer; display:flex; align-items:center; background: #450a0a;">
             <span style="margin-right:10px; width:20px; text-align:center;">
-                <i class="fa-solid fa-heart-pulse" style="color: #e91e63;"></i>
+                <i class="fa-solid fa-bug" style="color: #ef4444;"></i>
             </span>
-            <span>情感档案 (修复版)</span>
+            <span>运行路径诊断 (Debug)</span>
         </div>
     `;
 
     const intv = setInterval(() => {
         if ($('#extensionsMenu').length > 0) {
-            if ($('#st-test-trigger').length === 0) {
+            if ($('#st-diag-trigger').length === 0) {
                 $('#extensionsMenu').append(menuBtn);
-                $('#st-test-trigger').on('click', runTest);
+                $('#st-diag-trigger').on('click', runDiagnostic);
             }
             clearInterval(intv);
         }
     }, 500);
     
-    console.log("ST-Intimacy-Fixed Loaded");
+    console.log("ST-Diagnostic Loaded");
 });
