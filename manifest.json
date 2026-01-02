@@ -4,5 +4,7 @@
     "version": "1.0.0",
     "description": "显示与角色的聊天热力图和统计数据。",
     "loading_order": 1,
-    "requires": []
+    "requires": [],
+    "style": "style.css",
+    "js": "index.js"
 }
